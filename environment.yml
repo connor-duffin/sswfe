@@ -1,0 +1,16 @@
+name: swfe
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - fenics
+  - pip
+  - pip:
+    - h5py
+    - ipython
+    - jupyter
+    - matplotlib
+    - pytest
+    - pandas
+    - scipy
+    - gmsh
