@@ -160,104 +160,84 @@ class ShallowTwo:
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 
-        U = fe.FiniteElement("P", self.mesh.ufl_cell(), 2)
+        U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
         H = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
         TH = fe.MixedElement([U, H])
         W = self.W = fe.FunctionSpace(self.mesh, TH)
 
+        # split up function spaces for interpolation
+        self.U, self.H = W.split()
+        self.U_space = self.U.collapse()
+        self.H_space = self.H.collapse()
+
+        self.du = fe.Function(W)
+        u, h = fe.split(self.du)
+
+        self.du_prev = fe.Function(W)
+        u_prev, h_prev = fe.split(self.du_prev)
+
+        v_u, v_h = fe.TestFunctions(W)
+
         self.nu = 0.6
         self.C = 0.0025
-        self.H = 20.
+        self.H = 50.
 
+        g = fe.Constant(9.8)
+        nu = fe.Constant(self.nu)
+        C = fe.Constant(self.C)
+        dt = fe.Constant(self.dt)
 
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--simulation", default="dam_break")
-    args = parser.parse_args()
+        f_u = fe.Function(self.U_space)
+        f_h = fe.Function(self.H_space)
 
-    if args.simulation == "dam_break":
-        nt = 240
-        control = {
-            "nx": 1000,
-            "dt": 0.25,
-            "theta": 1.0,
-            "simulation": "dam_break"
-        }
+        # f_u_1 = "cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))"
 
-        u_lim = [0., 3.]
-        h_lim = [0., 5.]
-    elif args.simulation == "tidal_flow":
-        nt = 3600
-        control = {
-            "nx": 1000,
-            "dt": 2.5,
-            "theta": 1.0,
-            "simulation": "tidal_flow"
-        }
+        # f_u_2 = "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"
 
-        u_lim = [0., 0.18]
-        h_lim = [0., 70]
-    else:
-        print("simulation setting not recognised!")
-        raise ValueError
+        # f_h = "cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)"
 
-    t = 0.
-    swe = ShallowOne(control)
-    u_out = np.zeros((nt, swe.x_coords.shape[0]))
-    h_out = np.zeros((nt, swe.x_coords.shape[0]))
+        f_u_exact = fe.Expression(("cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))",
+                                   "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"
+                                ), degree=4)
+        f_h_exact = fe.Expression("cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)", degree=4)
 
-    if args.simulation == "tidal_flow":
-        h_out += swe.H.compute_vertex_values()
+        f_u.assign(f_u_exact)
+        f_h.interpolate(f_h_exact)
 
-    for i in range(nt):
-        t += swe.dt
-        swe.solve(t)
-        u_out[i, :] = swe.du.compute_vertex_values()[:(control["nx"] + 1)]
-        h_out[i, :] += swe.du.compute_vertex_values()[(control["nx"] + 1):]
+        self.theta = 1.0
+        u_mid = self.theta * u + (1 - self.theta) * u_prev
+        h_mid = self.theta * h + (1 - self.theta) * h_prev
+        u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
 
-    fig, ax = plt.subplots()
-    ax.set_ylim(u_lim)
-    line, = ax.plot(swe.x_coords, 0*u_out[0])
+        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx +
+                  fe.inner(h - h_prev, v_h) / dt * fe.dx +
+                  fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
+                  + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
+                  + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
+                  + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_mid) * fe.dx  # friction term
+                  - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
+                  - fe.inner(f_u, v_u) * fe.dx - fe.inner(f_h, v_h) * fe.dx)
+        self.J = fe.derivative(self.F, self.du)
 
-    def animate(i):
-        line.set_ydata(u_out[i])  # update the data.
-        return line,
+        self.u_exact = fe.Expression(("cos(x[0]) * sin(x[1])",
+                                      "sin(pow(x[0], 2)) + cos(x[1])"), degree=4)
+        self.h_exact = fe.Expression("sin(x[0]) * sin(x[1])", degree=4)
 
-    ani = animation.FuncAnimation(
-        fig, animate, interval=20, blit=True, frames=nt, save_count=50)
-    writer = animation.FFMpegWriter(
-        fps=24, metadata=dict(artist='Me'), bitrate=1800)
-    ani.save(f"figures/u_{args.simulation}.mp4", writer=writer)
-    plt.close()
+        def boundary(x, on_boundary):
+            return on_boundary
 
-    fig, ax = plt.subplots()
-    ax.set_ylim(h_lim)
-    line, = ax.plot(swe.x_coords, 0*h_out[0])
+        bc_u = fe.DirichletBC(self.W.sub(0), self.u_exact, boundary)
+        bc_h = fe.DirichletBC(self.W.sub(1), self.h_exact, boundary)
+        self.bcs = [bc_u, bc_h]
 
-    def animate(i):
-        line.set_ydata(h_out[i])  # update the data.
-        return line,
+    def solve(self, t, check_steady_state=False):
+        fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
+        fe.assign(self.du_prev, self.du)
 
-    ani = animation.FuncAnimation(
-        fig, animate, interval=20, blit=True, frames=nt, save_count=50)
-    writer = animation.FFMpegWriter(
-        fps=24, metadata=dict(artist='Me'), bitrate=1800)
-    ani.save(f"figures/h_{args.simulation}.mp4", writer=writer)
-    plt.close()
-
-    u, h = fe.split(swe.du)
-    # plot velocity component
-    fe.plot(u)
-    plt.ylim(u_lim)
-    plt.savefig(f"figures/u_{args.simulation}_final.png")
-    plt.close()
-
-    # plot height component
-    if args.simulation == "tidal_flow":
-        fe.plot(swe.H + h)
-    else:
-        fe.plot(h)
-
-    plt.ylim(h_lim)
-    plt.savefig(f"figures/h_{args.simulation}_final.png")
-    plt.close()
+    @staticmethod
+    def steady_state(u, u_prev, tol=1e-6):
+        diff = fe.errornorm(u, u_prev)
+        if diff <= tol:
+            return True
+        else:
+            return False
