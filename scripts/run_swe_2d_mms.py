@@ -5,9 +5,10 @@ import matplotlib.pyplot as plt
 from swe import ShallowTwo
 
 
-def compute_errors(nx):
-    control = {"nx": nx, "dt": 0.0025, "theta": 1}
-    swe = ShallowTwo(control)
+def compute_errors(mesh):
+    control = {"dt": 0.0025, "theta": 1}
+    swe = ShallowTwo(mesh, control)
+    dx = swe.dx
 
     t = 0.
     nt_max = 10_000
@@ -29,18 +30,27 @@ def compute_errors(nx):
 
     u_error = fe.errornorm(swe.u_exact, u)
     h_error = fe.errornorm(swe.h_exact, h)
-    return u_error, h_error
+    return dx, u_error, h_error
 
 
 if __name__ == "__main__":
+    use_stored_mesh = False
     nx = [5, 10, 20]
-    u_errors, h_errors = [], []
+    dx, u_errors, h_errors = [], [], []
+
     for n in nx:
-        u_error, h_error = compute_errors(nx=n)
+        if use_stored_mesh:
+            mesh = f"data/unit-square-mesh-{n}.xdmf"
+        else:
+            mesh = fe.UnitSquareMesh(n, n)
+
+        dx_error, u_error, h_error = compute_errors(mesh)
+
+        dx.append(dx_error)
         u_errors.append(u_error)
         h_errors.append(h_error)
 
-    dx = np.array([1 / n for n in nx])
+    dx = np.array(dx)
     u_errors = np.array(u_errors)
     h_errors = np.array(h_errors)
 

@@ -148,24 +148,32 @@ class ShallowOne:
 
 
 class ShallowTwo:
-    def __init__(self, control):
+    def __init__(self, mesh, control):
         # settings: L, nu, C
-        self.nx = control["nx"]
         self.dt = control["dt"]
         self.theta = control["theta"]
 
-        self.mesh = fe.UnitSquareMesh(self.nx, self.nx)
+        if type(mesh) == str:
+            # read mesh from file
+            self.mesh = fe.Mesh()
+            f = fe.XDMFFile(mesh)
+            f.read(self.mesh)
+        else:
+            self.mesh = mesh
+
+        self.dx = self.mesh.hmax()
         self.x = fe.SpatialCoordinate(self.mesh)
         self.x_coords = self.mesh.coordinates()
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 
+        # use P2-P1 elements only
         U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
         H = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
         TH = fe.MixedElement([U, H])
         W = self.W = fe.FunctionSpace(self.mesh, TH)
 
-        # split up function spaces for interpolation
+        # split up function spaces for later interpolation
         self.U, self.H = W.split()
         self.U_space = self.U.collapse()
         self.H_space = self.H.collapse()
