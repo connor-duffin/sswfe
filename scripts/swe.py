@@ -1,10 +1,13 @@
 """ Solve the Shallow-water equations in non-conservative form. """
+import h5py
+
 import numpy as np
 import fenics as fe
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 from argparse import ArgumentParser
+from numpy.testing import assert_allclose
 
 
 class PiecewiseIC(fe.UserExpression):
@@ -125,7 +128,8 @@ class ShallowOne:
 
             # add in boundary terms to the weak form
             self.F += v_h * u_prev * (
-                self.H + h_right) * fe.ds - v_h * u_prev * (self.H + h_left) * fe.ds
+                self.H + h_right) * fe.ds - v_h * u_prev * (self.H +
+                                                            h_left) * fe.ds
         elif self.simulation == "tidal_flow":
             u_right = fe.Constant(0.0)
 
@@ -149,9 +153,10 @@ class ShallowOne:
 
 class ShallowTwo:
     def __init__(self, mesh, control):
-        # settings: L, nu, C
         self.dt = control["dt"]
         self.theta = control["theta"]
+        self.simulation = control["simulation"]
+        self.integrate_continuity_by_parts = control["integrate_continuity_by_parts"]
 
         if type(mesh) == str:
             # read mesh from file
@@ -186,9 +191,17 @@ class ShallowTwo:
 
         v_u, v_h = fe.TestFunctions(W)
 
-        self.nu = 0.6
-        self.C = 0.0025
-        self.H = 50.
+        # storage for later
+        self.du_vertices = np.copy(self.du.compute_vertex_values())
+
+        if self.simulation == "mms":
+            self.nu = 0.6
+            self.C = 0.0025
+            self.H = 50.
+        elif self.simulation in ["cylinder", "laminar"]:
+            self.nu = 1e-1
+            self.C = 0.
+            self.H = 0.4
 
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
@@ -198,48 +211,108 @@ class ShallowTwo:
         f_u = fe.Function(self.U_space)
         f_h = fe.Function(self.H_space)
 
-        # f_u_1 = "cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))"
-
-        # f_u_2 = "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"
-
-        # f_h = "cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)"
-
-        f_u_exact = fe.Expression(("cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))",
-                                   "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"
-                                ), degree=4)
-        f_h_exact = fe.Expression("cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)", degree=4)
-
-        f_u.assign(f_u_exact)
-        f_h.interpolate(f_h_exact)
-
         self.theta = 1.0
         u_mid = self.theta * u + (1 - self.theta) * u_prev
         h_mid = self.theta * h + (1 - self.theta) * h_prev
         u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
 
-        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx +
-                  fe.inner(h - h_prev, v_h) / dt * fe.dx +
-                  fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
+        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx
+                  + fe.inner(h - h_prev, v_h) / dt * fe.dx
+                  + fe.inner(fe.dot(u_prev, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
                   + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
                   + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
                   + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_mid) * fe.dx  # friction term
-                  - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
                   - fe.inner(f_u, v_u) * fe.dx - fe.inner(f_h, v_h) * fe.dx)
+
+        # add in continuity term
+        if self.integrate_continuity_by_parts:
+            self.F += -fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
+        else:
+            self.F += fe.inner(fe.div((self.H + h_mid) * u_mid), v_h) * fe.dx
+
         self.J = fe.derivative(self.F, self.du)
 
-        self.u_exact = fe.Expression(("cos(x[0]) * sin(x[1])",
-                                      "sin(pow(x[0], 2)) + cos(x[1])"), degree=4)
-        self.h_exact = fe.Expression("sin(x[0]) * sin(x[1])", degree=4)
+        if self.simulation == "mms":
+            f_u_exact = fe.Expression((
+                "cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))",
+                "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"),
+                degree=4)
+            f_h_exact = fe.Expression(
+                "cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)",
+                degree=4)
 
-        def boundary(x, on_boundary):
-            return on_boundary
+            f_u.assign(f_u_exact)
+            f_h.interpolate(f_h_exact)
 
-        bc_u = fe.DirichletBC(self.W.sub(0), self.u_exact, boundary)
-        bc_h = fe.DirichletBC(self.W.sub(1), self.h_exact, boundary)
-        self.bcs = [bc_u, bc_h]
+            self.u_exact = fe.Expression(
+                ("cos(x[0]) * sin(x[1])", "sin(pow(x[0], 2)) + cos(x[1])"),
+                degree=4)
+            self.h_exact = fe.Expression("sin(x[0]) * sin(x[1])", degree=4)
 
-    def solve(self, t, check_steady_state=False):
-        fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
+            def boundary(x, on_boundary):
+                return on_boundary
+
+            bc_u = fe.DirichletBC(self.W.sub(0), self.u_exact, boundary)
+            bc_h = fe.DirichletBC(self.W.sub(1), self.h_exact, boundary)
+            self.bcs = [bc_u, bc_h]
+        elif self.simulation in ["cylinder", "laminar"]:
+            # basic BC's
+            # TODO: take in mesh parameterisations as argument
+            inflow = "near(x[0], 0)"
+            outflow = "near(x[0], 6)"
+            walls = "near(x[1], 0) || near(x[1], 1.85)"
+
+            bcu_inflow = fe.DirichletBC(self.W.sub(0), fe.Constant((0.5, 0.)), inflow)
+            bcu_outflow = fe.DirichletBC(self.W.sub(0), fe.Constant((0.5, 0.)), outflow)
+            bcu_walls = fe.DirichletBC(self.W.sub(0), fe.Constant((0., 0.)), walls)
+            self.bcs = [bcu_inflow, bcu_outflow, bcu_walls]
+
+            # need to include surface integrals if we integrate by parts
+            # only left and right boundaries matter, as the rest are zero (no-slip condition)
+            if self.integrate_continuity_by_parts:
+                class LeftBoundary(fe.SubDomain):
+                    def inside(self, x, on_boundary):
+                        tol = 1E-14  # tolerance for coordinate comparisons
+                        return on_boundary and abs(x[0]) < tol
+
+                Gamma_1 = LeftBoundary()
+                Gamma_1.mark(self.boundaries, 1)  # mark with tag 1 for LHS
+
+                class RightBoundary(fe.SubDomain):
+                    def inside(self, x, on_boundary):
+                        tol = 1E-14  # tolerance for coordinate comparisons
+                        return on_boundary and abs(x[0] - 6) < tol
+
+                Gamma_3 = RightBoundary()
+                Gamma_3.mark(self.boundaries, 2)  # mark with tag 2 for RHS
+                ds = fe.Measure('ds', domain=mesh, subdomain_data=self.boundaries)
+                self.F += (
+                    v_h * (self.H + h_mid) * (-0.5) * ds(1)  # LHS bounds
+                    + v_h * (self.H + h_mid) * (0.5) * ds(2)  # RHS bounds
+                )
+
+            # TODO: take in cylinder mesh parameterisations as an argument/option
+            # 0.925 is the centre of the domain
+            if self.simulation == "cylinder":
+                cylinder = "on_boundary && x[0] >= 0.825 && x[0] <= 1.125 && x[1] >= 0.825 && x[1] <= 1.125"
+                self.bcs.append(
+                    fe.DirichletBC(self.W.sub(0), fe.Constant((0., 0.)), cylinder))
+
+        problem = fe.NonlinearVariationalProblem(
+            self.F, self.du, bcs=self.bcs, J=self.J)
+        self.solver = fe.NonlinearVariationalSolver(problem)
+
+        prm = self.solver.parameters
+        prm["nonlinear_solver"] = "snes"
+        # prm["snes_solver"]["absolute_tolerance"] = 1e-6
+        # prm["snes_solver"]["relative_tolerance"] = 1e-3
+        prm["snes_solver"]["line_search"] = "bt"
+
+        prm["snes_solver"]["linear_solver"] = "gmres"
+        prm["snes_solver"]["preconditioner"] = "ilu"
+
+    def solve(self):
+        self.solver.solve()
         fe.assign(self.du_prev, self.du)
 
     @staticmethod
@@ -249,3 +322,48 @@ class ShallowTwo:
             return True
         else:
             return False
+
+    def set_curr_vector(self, du_vec):
+        self.du.vector().set_local(du_vec)
+
+    def set_prev_vector(self, du_vec):
+        self.du_prev.vector().set_local(du_vec)
+
+    def get_vertex_values(self):
+        n_vertices = len(self.mesh.coordinates())
+        self.du_vertices[:] = self.du.compute_vertex_values()
+        return (self.du_vertices[:n_vertices],
+                self.du_vertices[n_vertices:(2 * n_vertices)],
+                self.du_vertices[(2 * n_vertices):])
+
+    def setup_checkpoint(self, checkpoint_file):
+        """ Set up the checkpoint file, writing the appropriate things etc. """
+        self.checkpoint = h5py.File(checkpoint_file, "w")
+        self.checkpoint.create_dataset("x_vertices",
+                                       data=self.mesh.coordinates())
+        self.checkpoint.create_dataset("t", data=0.)
+        self.checkpoint.create_dataset(
+            "du", data=np.zeros_like(self.du.vector().get_local()))
+
+    def checkpoint_load(self, checkpoint_file):
+        """ Load from the checkpoint file. Returns the current time of the simulation. """
+        self.checkpoint = h5py.File(checkpoint_file, "r+")
+
+        # check that things are okay
+        assert_allclose(self.checkpoint["x_vertices"][:].shape,
+                        self.mesh.coordinates().shape)
+        assert self.checkpoint["du"][:].shape == self.du.vector().get_local().shape
+        assert self.checkpoint["t"][()] >= 0.
+
+        # set both current and prev for SNES initialisation
+        self.set_curr_vector(self.checkpoint["du"][:])
+        self.set_prev_vector(self.checkpoint["du"][:])
+        return self.checkpoint["t"][()]
+
+    def checkpoint_save(self, t):
+        """ Save the simulation at the current time. """
+        self.checkpoint["t"][()] = t
+        self.checkpoint["du"][:] = self.du.vector().get_local()
+
+    def checkpoint_close(self):
+        self.checkpoint.close()
