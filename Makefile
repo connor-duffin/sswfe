@@ -1,11 +1,23 @@
-data/channel.msh:
+mesh/channel.msh:
 		python3 scripts/generate_mesh_hole.py $@
 
-data/channel.xdmf: data/channel.msh
+mesh/channel.xdmf: mesh/channel.msh
 		python3 scripts/convert_mesh.py $< $@
 
-data/channel-hole.msh:
+mesh/channel-hole.msh:
 		python3 scripts/generate_mesh_hole.py --add_cylinder $@
 
-data/channel-hole.xdmf: data/channel-hole.msh
+mesh/channel-hole.xdmf: mesh/channel-hole.msh
 		python3 scripts/convert_mesh.py $< $@
+
+outputs/swe-laminar.h5: mesh/channel.xdmf
+		python3 scripts/run_swe_2d_laminar.py $< $@
+
+outputs/swe-laminar-ibp.h5: mesh/channel.xdmf
+		python3 scripts/run_swe_2d_laminar.py --integrate_continuity_by_parts $< $@
+
+
+
+
+laminar_examples: outputs/swe-laminar-ibp.h5 outputs/swe-laminar.h5
+

@@ -285,7 +285,7 @@ class ShallowTwo:
 
                 Gamma_3 = RightBoundary()
                 Gamma_3.mark(self.boundaries, 2)  # mark with tag 2 for RHS
-                ds = fe.Measure('ds', domain=mesh, subdomain_data=self.boundaries)
+                ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
                 self.F += (
                     v_h * (self.H + h_mid) * (-0.5) * ds(1)  # LHS bounds
                     + v_h * (self.H + h_mid) * (0.5) * ds(2)  # RHS bounds
