@@ -1,1 +1,6 @@
-rsync -av --progress --exclude .git --exclude .DS_Store /Users/connor/Projects/statfluids/20220609-swfe/ cambox:projects/20220609-swfe/
+rsync \
+      -av --progress \
+      --exclude .git \
+      --exclude .DS_Store \
+      --exclude figures \
+      /Users/connor/Projects/statfluids/20220609-swfe/ cambox:projects/20220609-swfe/
