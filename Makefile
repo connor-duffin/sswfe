@@ -16,8 +16,8 @@ outputs/swe-laminar.h5: mesh/channel.xdmf
 outputs/swe-laminar-ibp.h5: mesh/channel.xdmf
 		python3 scripts/run_swe_2d_laminar.py --integrate_continuity_by_parts $< $@
 
-
-
-
 laminar_examples: outputs/swe-laminar-ibp.h5 outputs/swe-laminar.h5
+
+laminar_figures: mesh/channel.xdmf outputs/swe-laminar.h5
+		python3 scripts/plot_laminar.py mesh/channel.xdmf outputs/swe-laminar.h5 figures/swe-laminar/
 

@@ -1,5 +1,6 @@
 """ Solve the Shallow-water equations in non-conservative form. """
 import h5py
+import logging
 
 import numpy as np
 import fenics as fe
@@ -8,6 +9,8 @@ import matplotlib.animation as animation
 
 from argparse import ArgumentParser
 from numpy.testing import assert_allclose
+
+logger = logging.getLogger(__name__)
 
 
 class PiecewiseIC(fe.UserExpression):
@@ -27,7 +30,6 @@ class ShallowOne:
         # settings: L, nu, C
         self.nx = control["nx"]
         self.dt = control["dt"]
-        self.theta = control["theta"]
         self.simulation = control["simulation"]
 
         if self.simulation == "dam_break":
@@ -39,8 +41,7 @@ class ShallowOne:
             self.nu = 1.0
             self.C = 0.
         else:
-            print("simulation setup not recognised")
-            raise ValueError
+            raise ValueError("Simulation steup not recognised")
 
         # setup mesh and function spaces
         self.mesh = fe.IntervalMesh(self.nx, 0., self.L)
@@ -75,9 +76,6 @@ class ShallowOne:
                 L=self.L,
                 degree=2)
             self.H = fe.interpolate(H, V)
-        else:
-            print("simulation setup not currently enabled")
-            raise ValueError
 
         self.du = fe.Function(W)
         u, h = fe.split(self.du)
@@ -208,10 +206,9 @@ class ShallowTwo:
         C = fe.Constant(self.C)
         dt = fe.Constant(self.dt)
 
-        f_u = fe.Function(self.U_space)
-        f_h = fe.Function(self.H_space)
+        self.f_u = fe.Function(self.U_space)
+        self.f_h = fe.Function(self.H_space)
 
-        self.theta = 1.0
         u_mid = self.theta * u + (1 - self.theta) * u_prev
         h_mid = self.theta * h + (1 - self.theta) * h_prev
         u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
@@ -222,7 +219,7 @@ class ShallowTwo:
                   + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
                   + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
                   + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_mid) * fe.dx  # friction term
-                  - fe.inner(f_u, v_u) * fe.dx - fe.inner(f_h, v_h) * fe.dx)
+                  - fe.inner(self.f_u, v_u) * fe.dx - fe.inner(self.f_h, v_h) * fe.dx)
 
         # add in continuity term
         if self.integrate_continuity_by_parts:
@@ -241,8 +238,8 @@ class ShallowTwo:
                 "cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)",
                 degree=4)
 
-            f_u.assign(f_u_exact)
-            f_h.interpolate(f_h_exact)
+            self.f_u.assign(f_u_exact)
+            self.f_h.interpolate(f_h_exact)
 
             self.u_exact = fe.Expression(
                 ("cos(x[0]) * sin(x[1])", "sin(pow(x[0], 2)) + cos(x[1])"),
