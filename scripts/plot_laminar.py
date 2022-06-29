@@ -37,10 +37,20 @@ def plot_fields_curr(swe, t, output_dir):
         ax.set_ylabel(r"$y$")
     axs[-1].set_xlabel(r"$x$")
 
-    # cbar.ax.set_ylabel('verbosity coefficient')
-    # Make a colorbar for the ContourSet returned by the contourf call.
-    # plt.savefig(output_dir + "solution-fields.png", dpi=600)
-    # plt.close()
+
+def plot_quiver_curr(swe, t):
+    x_vertices = swe.mesh.coordinates()
+    n_vertices = len(x_vertices)
+    du_vec = swe.du.compute_vertex_values()
+    u1, u2, h = (du_vec[:n_vertices], du_vec[n_vertices:(2 * n_vertices)],
+                 du_vec[(2 * n_vertices):])
+
+    x, y = x_vertices[:, 0], x_vertices[:, 1]
+    fig, ax = plt.subplots(1, 1, figsize=(9, 4))
+    ax.quiver(x, y, u1, u2)
+    ax.set_xlabel(r"$x$")
+    ax.set_ylabel(r"$y$")
+    ax.set_title(f"Velocity field at time t = {t:.5f}")
 
 
 parser = ArgumentParser()
@@ -55,27 +65,29 @@ t_final = output["t"][-1]
 
 swe = ShallowTwo(mesh=args.mesh_file,
                  control={
-                     "dt": 1e-3,
-                     "theta": 1,
-                     "simulation": "laminar",
-                     "integrate_continuity_by_parts": args.integrate_continuity_by_parts
+                     "dt":
+                     1e-3,
+                     "theta":
+                     1,
+                     "simulation":
+                     "laminar",
+                     "integrate_continuity_by_parts":
+                     args.integrate_continuity_by_parts
                  })
 
 swe.set_curr_vector(output["du"][-1, :])
 swe.set_prev_vector(output["du"][-2, :])
 
+plot_quiver_curr(swe, t_final)
+plt.savefig(args.figure_output_dir + "quiver.png", dpi=600)
+plt.close()
+
 # plot the mesh
 fe.plot(swe.mesh)
-plt.show()
+plt.savefig(args.figure_output_dir + "mesh.png", dpi=600)
+plt.close()
 
 # plot the solution field
 plot_fields_curr(swe, t_final, args.figure_output_dir)
-plt.show()
-
-# investigate the Jacobian matrix
-J = fe.assemble(swe.J)
-J_scipy = dolfin_to_csr(J)
-from scipy.sparse.linalg import eigs
-vals, vecs = eigs(J_scipy, k=50)
-plt.semilogy(vals)
-plt.show()
+plt.savefig(args.figure_output_dir + "solution-fields.png", dpi=600)
+plt.close()

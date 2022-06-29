@@ -23,7 +23,7 @@ swe = ShallowTwo(mesh=args.mesh_file,
 if args.integrate_continuity_by_parts:
     logging.info("integrating continuity equation by parts")
 
-nt = 1000
+nt = 10_000
 nt_save = 10
 # HACK: because I am lazy at the moment
 nt_out = len([i for i in range(nt) if i % nt_save == 0])
