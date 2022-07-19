@@ -3,4 +3,5 @@ rsync \
       --exclude .git \
       --exclude .DS_Store \
       --exclude figures \
+      --exclude outputs \
       /Users/connor/Projects/statfluids/20220609-swfe/ cambox:projects/20220609-swfe/
