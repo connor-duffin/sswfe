@@ -197,9 +197,9 @@ class ShallowTwo:
             self.C = 0.0025
             self.H = 50.
         elif self.simulation in ["cylinder", "laminar"]:
-            self.nu = 1e-1
+            self.nu = 1e-6
             self.C = 0.
-            self.H = 0.4
+            self.H = 0.073
 
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
@@ -255,14 +255,19 @@ class ShallowTwo:
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
             # TODO: take in mesh parameterisations as argument
+            u_in = fe.Constant((0.535, 0.))
+            u_out = u_in
+            no_slip = fe.Constant((0., 0.))
+
             inflow = "near(x[0], 0)"
-            outflow = "near(x[0], 6)"
             walls = "near(x[1], 0) || near(x[1], 1.85)"
 
-            bcu_inflow = fe.DirichletBC(self.W.sub(0), fe.Constant((0.5, 0.)), inflow)
-            bcu_outflow = fe.DirichletBC(self.W.sub(0), fe.Constant((0.5, 0.)), outflow)
-            bcu_walls = fe.DirichletBC(self.W.sub(0), fe.Constant((0., 0.)), walls)
-            self.bcs = [bcu_inflow, bcu_outflow, bcu_walls]
+            # outflow = "near(x[0], 6)"
+            # bcu_outflow = fe.DirichletBC(self.W.sub(0), u_out, outflow)
+
+            bcu_inflow = fe.DirichletBC(self.W.sub(0), u_in, inflow)
+            bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
+            self.bcs = [bcu_inflow, bcu_walls]
 
             # need to include surface integrals if we integrate by parts
             # only left and right boundaries matter, as the rest are zero (no-slip condition)
@@ -284,8 +289,8 @@ class ShallowTwo:
                 Gamma_3.mark(self.boundaries, 2)  # mark with tag 2 for RHS
                 ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
                 self.F += (
-                    v_h * (self.H + h_mid) * (-0.5) * ds(1)  # LHS bounds
-                    + v_h * (self.H + h_mid) * (0.5) * ds(2)  # RHS bounds
+                    v_h * (self.H + h_mid) * (-u_in) * ds(1)  # LHS bounds
+                    + v_h * (self.H + h_mid) * (u_out) * ds(2)  # RHS bounds
                 )
 
             # TODO: take in cylinder mesh parameterisations as an argument/option
@@ -293,7 +298,7 @@ class ShallowTwo:
             if self.simulation == "cylinder":
                 cylinder = "on_boundary && x[0] >= 0.825 && x[0] <= 1.125 && x[1] >= 0.825 && x[1] <= 1.125"
                 self.bcs.append(
-                    fe.DirichletBC(self.W.sub(0), fe.Constant((0., 0.)), cylinder))
+                    fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
         problem = fe.NonlinearVariationalProblem(
             self.F, self.du, bcs=self.bcs, J=self.J)

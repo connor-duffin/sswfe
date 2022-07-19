@@ -14,6 +14,10 @@ domain_width = 1.85
 domain_length = 6.
 cylinder_diameter = 10 * cm
 
+# pad out the domain to ensure outflow condition
+if args.add_cylinder:
+    domain_length += 0.2
+
 gmsh.initialize()
 gmsh.model.add("channel")
 h = 5 * cm
