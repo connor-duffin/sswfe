@@ -3,6 +3,7 @@ import logging
 
 from argparse import ArgumentParser
 from swe import ShallowTwo
+from tqdm import tqdm
 
 logging.basicConfig(format='%(asctime)s - %(relativeCreated)d ms - %(name)s - %(levelname)s - %(message)s',
                     level=logging.DEBUG)
@@ -23,7 +24,7 @@ logging.info("using %s as the simulation settings", simulation)
 
 swe = ShallowTwo(mesh=args.mesh_file,
                  control={
-                     "dt": 1e-4,
+                     "dt": 1e-3,
                      "theta": 1,
                      "simulation": simulation,
                      "integrate_continuity_by_parts": args.integrate_continuity_by_parts
@@ -32,12 +33,13 @@ swe = ShallowTwo(mesh=args.mesh_file,
 if args.integrate_continuity_by_parts:
     logging.info("integrating continuity equation by parts")
 
-nt = 30_001
+nt = 100_001
 nt_thin = 100
 # HACK: because I am lazy at the moment
 nt_out = len([i for i in range(nt) if i % nt_thin == 0])
 n_dofs = len(swe.du.vector().get_local())
 logging.info("saving %i DOFs at %i timesteps", n_dofs, nt_out)
+logging.info("running simulation up to time %f.5f", nt * swe.dt)
 
 output = h5py.File(args.output_file, "w")
 output.create_dataset("x_vertices", data=swe.mesh.coordinates())
@@ -46,9 +48,13 @@ du_out = output.create_dataset("du", (nt_out, n_dofs))
 
 t = 0.
 i_save = 0
-for i in range(nt):
+for i in tqdm(range(nt)):
     t += swe.dt
-    swe.solve()
+    try:
+        swe.solve()
+    except RuntimeError:
+        print(f"failed at iteration {i}, time {t:.5f} exiting")
+        break
 
     if i % nt_thin == 0:
         logging.info("%d of %d timesteps done", i + 1, nt)

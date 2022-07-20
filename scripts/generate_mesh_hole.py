@@ -11,8 +11,8 @@ args = parser.parse_args()
 
 cm = 1e-2
 domain_width = 1.85
-domain_length = 6.
-cylinder_diameter = 10 * cm
+domain_length = 5.2
+cylinder_diameter = 0.1
 
 # pad out the domain to ensure outflow condition
 if args.add_cylinder:
@@ -20,7 +20,7 @@ if args.add_cylinder:
 
 gmsh.initialize()
 gmsh.model.add("channel")
-h = 5 * cm
+h = 2 * cm
 
 factory = gmsh.model.occ
 factory.addPoint(0., 0., 0, h, 1)
@@ -37,15 +37,11 @@ factory.addCurveLoop([1, 2, 3, 4], 10)
 
 if args.add_cylinder:
     # more refined about the cylinder
-    factory.addPoint(domain_width / 2, domain_width / 2, 0, h / 5, 5)
-    factory.addPoint(domain_width / 2 - cylinder_diameter, domain_width / 2, 0,
-                    h / 5, 6)
-    factory.addPoint(domain_width / 2 + cylinder_diameter, domain_width / 2, 0,
-                    h / 5, 7)
-    factory.addPoint(domain_width / 2, domain_width / 2 - cylinder_diameter, 0,
-                    h / 5, 8)
-    factory.addPoint(domain_width / 2, domain_width / 2 + cylinder_diameter, 0,
-                    h / 5, 9)
+    factory.addPoint(2.6, domain_width / 2, 0, h / 5, 5)
+    factory.addPoint(2.6 - cylinder_diameter / 2, domain_width / 2, 0, h / 5, 6)
+    factory.addPoint(2.6 + cylinder_diameter / 2, domain_width / 2, 0, h / 5, 7)
+    factory.addPoint(2.6, domain_width / 2 - cylinder_diameter / 2, 0, h / 5, 8)
+    factory.addPoint(2.6, domain_width / 2 + cylinder_diameter / 2, 0, h / 5, 9)
 
     factory.addCircleArc(6, 5, 8, 5)  # left to bot
     factory.addCircleArc(7, 5, 8, 6)  # right to bot

@@ -9,13 +9,13 @@ rsb:
 # meshes
 # ------
 mesh/channel.msh:
-		python3 scripts/generate_mesh_hole.py $@
+		python3 scripts/generate_mesh_hole.py --popup $@
 
 mesh/channel.xdmf: mesh/channel.msh
 		python3 scripts/convert_mesh.py $< $@
 
 mesh/channel-hole.msh:
-		python3 scripts/generate_mesh_hole.py --add_cylinder $@
+		python3 scripts/generate_mesh_hole.py --add_cylinder --popup $@
 
 mesh/channel-hole.xdmf: mesh/channel-hole.msh
 		python3 scripts/convert_mesh.py $< $@
@@ -50,6 +50,10 @@ laminar_ibp_figures: mesh/channel.xdmf outputs/swe-laminar-ibp.h5
 outputs/swe-cylinder.h5: mesh/channel-hole.xdmf
 		python3 scripts/run_swe_2d_channel.py \
 				--cylinder mesh/channel-hole.xdmf $@
+
+outputs/swe-cylinder-refined.h5: mesh/channel-hole-refined.xdmf
+		python3 scripts/run_swe_2d_channel.py \
+				--cylinder mesh/channel-hole-refined.xdmf $@
 
 outputs/swe-cylinder-ibp.h5: mesh/channel-hole.xdmf
 		python3 scripts/run_swe_2d_channel.py \

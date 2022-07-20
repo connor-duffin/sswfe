@@ -256,7 +256,7 @@ class ShallowTwo:
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
             # TODO: take in mesh parameterisations as argument
-            u_in = fe.Constant((0.535, 0.))
+            u_in = fe.Constant((0.01, 0.))
             u_out = u_in
             no_slip = fe.Constant((0., 0.))
 
@@ -297,7 +297,7 @@ class ShallowTwo:
             # TODO: take in cylinder mesh parameterisations as an argument/option
             # 0.925 is the centre of the domain
             if self.simulation == "cylinder":
-                cylinder = "on_boundary && x[0] >= 0.825 && x[0] <= 1.125 && x[1] >= 0.825 && x[1] <= 1.125"
+                cylinder = "on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && x[1] >= 0.875 && x[1] <= 0.975"
                 self.bcs.append(
                     fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
