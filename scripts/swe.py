@@ -11,6 +11,7 @@ from argparse import ArgumentParser
 from numpy.testing import assert_allclose
 
 logger = logging.getLogger(__name__)
+fe.set_log_level(40)  # only print emergencies
 
 
 class PiecewiseIC(fe.UserExpression):
@@ -304,14 +305,19 @@ class ShallowTwo:
             self.F, self.du, bcs=self.bcs, J=self.J)
         self.solver = fe.NonlinearVariationalSolver(problem)
 
+        # solver options
         prm = self.solver.parameters
         prm["nonlinear_solver"] = "snes"
-        # prm["snes_solver"]["absolute_tolerance"] = 1e-6
-        # prm["snes_solver"]["relative_tolerance"] = 1e-3
         prm["snes_solver"]["line_search"] = "bt"
-
         prm["snes_solver"]["linear_solver"] = "gmres"
         prm["snes_solver"]["preconditioner"] = "ilu"
+
+        # don't print outputs from the Newton solver
+        prm["snes_solver"]["report"] = False
+
+        # JIC we want to tweak tolerances
+        # prm["snes_solver"]["absolute_tolerance"] = 1e-6
+        # prm["snes_solver"]["relative_tolerance"] = 1e-3
 
     def solve(self):
         self.solver.solve()

@@ -23,7 +23,7 @@ logging.info("using %s as the simulation settings", simulation)
 
 swe = ShallowTwo(mesh=args.mesh_file,
                  control={
-                     "dt": 5e-4,
+                     "dt": 1e-4,
                      "theta": 1,
                      "simulation": simulation,
                      "integrate_continuity_by_parts": args.integrate_continuity_by_parts
