@@ -6,7 +6,7 @@ from swe import ShallowTwo
 
 
 def compute_errors(mesh):
-    control = {"dt": 0.0025, "theta": 1}
+    control = {"dt": 0.0025, "theta": 1, "simulation": "mms", "integrate_continuity_by_parts": True}
     swe = ShallowTwo(mesh, control)
     dx = swe.dx
 
@@ -17,7 +17,7 @@ def compute_errors(mesh):
         u_prev, h_prev = du_prev.split()
 
         t += swe.dt
-        swe.solve(t)
+        swe.solve()
 
         u, h = swe.du.split()
         reached_steady_state = swe.steady_state(u, u_prev)
@@ -65,5 +65,5 @@ if __name__ == "__main__":
     plt.xlabel(r"$\Delta x$")
     plt.ylabel(r"$L^2$ error")
     plt.legend()
-    plt.savefig("figures/mms-convergence.png", dpi=600)
-    plt.close()
+    plt.show()
+    # plt.savefig("figures/mms-convergence.png", dpi=600)
