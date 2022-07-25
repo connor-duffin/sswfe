@@ -20,6 +20,12 @@ mesh/channel-hole.msh:
 mesh/channel-hole.xdmf: mesh/channel-hole.msh
 		python3 scripts/convert_mesh.py $< $@
 
+mesh/channel-piggott.msh:
+		python3 scripts/generate_mesh_square_hole.py --add_hole $@
+
+mesh/channel-piggott.xdmf: mesh/channel-piggott.msh
+		python3 scripts/convert_mesh.py $< $@
+
 
 # laminar flow
 # ------------
