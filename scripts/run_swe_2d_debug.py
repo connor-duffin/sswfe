@@ -3,6 +3,8 @@ import logging
 from fenics import MPI
 from swe import ShallowTwo
 
+logging.basicConfig(level=logging.INFO)
+
 comm = MPI.comm_world
 rank = comm.rank
 
@@ -15,15 +17,24 @@ swe = ShallowTwo(mesh=mesh_file,
                      "simulation": "cylinder",
                      "integrate_continuity_by_parts": True
                  })
-print("using smaller timestep")
+swe.setup_checkpoint(checkpoint_file)
 
 t = 0.
-nt = 15_001
+nt = 30_001
+nt_thin = 100
 for i in range(nt):
-    t += swe.dt
+    if i % nt_thin == 0:
+        if rank == 0:
+            logging.info("storing solution at time %.5f, iteration %d of %d complete",
+                         t, i + 1, nt)
+        swe.checkpoint_save(t)
 
     try:
         swe.solve()
+        t += swe.dt
     except RuntimeError:
         print(f"SOLVER FAILED AT TIME {t:.5f}")
+        swe.checkpoint_save(t)
         break
+
+swe.checkpoint_close()
