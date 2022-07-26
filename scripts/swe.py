@@ -1,18 +1,16 @@
 """ Solve the Shallow-water equations in non-conservative form. """
-import h5py
 import logging
 
 import numpy as np
 import fenics as fe
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-
 from swe_les import LES
 
-from argparse import ArgumentParser
-from numpy.testing import assert_allclose
-
+# initialise the logger
 logger = logging.getLogger(__name__)
+
+# use default Fenics MPI comm (itself uses mpi4py)
+comm = fe.MPI.comm_world
+rank = comm.Get_rank()
 
 
 class PiecewiseIC(fe.UserExpression):
@@ -160,13 +158,15 @@ class ShallowTwo:
 
         if type(mesh) == str:
             # read mesh from file
+            logger.info("reading mesh from file")
             self.mesh = fe.Mesh()
             f = fe.XDMFFile(mesh)
             f.read(self.mesh)
         else:
+            logger.info("setting mesh from object")
             self.mesh = mesh
 
-        print(f"mesh has {self.mesh.num_cells()} elements")
+        logger.info(f"mesh has {self.mesh.num_cells()} elements")
         self.dx = self.mesh.hmax()
         self.x = fe.SpatialCoordinate(self.mesh)
         self.x_coords = self.mesh.coordinates()
@@ -365,32 +365,12 @@ class ShallowTwo:
 
     def setup_checkpoint(self, checkpoint_file):
         """ Set up the checkpoint file, writing the appropriate things etc. """
-        self.checkpoint = h5py.File(checkpoint_file, "w")
-        self.checkpoint.create_dataset("x_vertices",
-                                       data=self.mesh.coordinates())
-        self.checkpoint.create_dataset("t", data=0.)
-        self.checkpoint.create_dataset(
-            "du", data=np.zeros_like(self.du.vector().get_local()))
-
-    def checkpoint_load(self, checkpoint_file):
-        """ Load from the checkpoint file. Returns the current time of the simulation. """
-        self.checkpoint = h5py.File(checkpoint_file, "r+")
-
-        # check that things are okay
-        assert_allclose(self.checkpoint["x_vertices"][:].shape,
-                        self.mesh.coordinates().shape)
-        assert self.checkpoint["du"][:].shape == self.du.vector().get_local().shape
-        assert self.checkpoint["t"][()] >= 0.
-
-        # set both current and prev for SNES initialisation
-        self.set_curr_vector(self.checkpoint["du"][:])
-        self.set_prev_vector(self.checkpoint["du"][:])
-        return self.checkpoint["t"][()]
+        print(f"storing outputs in {checkpoint_file}")
+        self.checkpoint = fe.HDF5File(self.mesh.mpi_comm(), checkpoint_file, "w")
 
     def checkpoint_save(self, t):
         """ Save the simulation at the current time. """
-        self.checkpoint["t"][()] = t
-        self.checkpoint["du"][:] = self.du.vector().get_local()
+        self.checkpoint.write(self.du, "/du", t)
 
     def checkpoint_close(self):
         self.checkpoint.close()

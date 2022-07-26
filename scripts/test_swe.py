@@ -1,3 +1,4 @@
+import os
 import pytest
 import numpy as np
 import fenics as fe
@@ -73,10 +74,10 @@ def test_shallowtwo_init():
     assert len(swe.du_vertices) == 3 * len(swe.x_coords)
     assert len(swe.bcs) == 2
 
-    assert len(swe.F.integrals()) == 9
+    assert len(swe.F.integrals()) == 10
 
     assert swe.solver.parameters["snes_solver"]["linear_solver"] == "gmres"
-    assert swe.solver.parameters["snes_solver"]["preconditioner"] == "ilu"
+    assert swe.solver.parameters["snes_solver"]["preconditioner"] == "fieldsplit"
 
     swe = ShallowTwo(mesh, control)
     control = {"dt": 0.01,
@@ -84,7 +85,7 @@ def test_shallowtwo_init():
                "simulation": "laminar",
                "integrate_continuity_by_parts": True}
     swe = ShallowTwo(mesh, control)
-    assert len(swe.bcs) == 3
+    assert len(swe.bcs) == 2
     assert len(swe.F.integrals()) == 11
 
     for forcing in [swe.f_u, swe.f_h]:
@@ -103,3 +104,33 @@ def test_shallowtwo_ss(swe_2d):
     assert swe_2d.steady_state(swe_2d.du, swe_2d.du_prev)
     swe_2d.set_prev_vector(np.ones_like(swe_2d.du_prev.vector().get_local()))
     assert not swe_2d.steady_state(swe_2d.du, swe_2d.du_prev)
+
+
+def test_shallowtwo_save(swe_2d):
+    f = "temp.h5"
+    swe_2d.setup_checkpoint(f)
+    du_true = fe.Expression(("t*x[0]", "t * x[1]", "t * x[0] * x[1]"), t=0., degree=2)
+
+    t = np.linspace(0, 1, 10)
+    for i, t_curr in enumerate(t):
+        du_true.t = t_curr
+        swe_2d.du.interpolate(du_true)
+        swe_2d.checkpoint_save(t_curr)
+
+    swe_2d.checkpoint_close()
+
+    checkpoint = fe.HDF5File(swe_2d.mesh.mpi_comm(), f, "r")
+    du_true_function = fe.Function(swe_2d.W)
+    for i, t_curr in enumerate(t):
+        du_true.t = t_curr
+        du_true_function.interpolate(du_true)
+
+        vec_name = f"/du/vector_{i}"
+        checkpoint.read(swe_2d.du, vec_name)  # read into du
+        timestamp = checkpoint.attributes(vec_name)["timestamp"]
+        result = swe_2d.du.vector() - du_true_function.vector()
+        assert timestamp == t_curr
+        np.testing.assert_allclose(result.get_local(), 0.)
+
+    checkpoint.close()
+    os.remove(f)
