@@ -219,17 +219,15 @@ class ShallowTwo:
         self.les = LES(mesh=self.mesh, fs=self.H_space, u=u_mid, density=1.0, smagorinsky_coefficient=0.164)
         nu_t = self.les.eddy_viscosity
 
-        # F -= nu*fe.inner(fe.grad(u_mid) + fe.grad(u_mid).T, fe.grad(v_u)) * fe.dx
-        # F += nu*(2.0/3.0)*fe.inner(fe.div(u_mid) * fe.Identity(2), fe.grad(fe.v_u)) * fe.dx
-        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx
-                  + fe.inner(h - h_prev, v_h) / dt * fe.dx
+        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
+                  + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
                   + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
-                  # + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
-                  + (nu + nu_t) * fe.inner(fe.grad(u_mid) + fe.grad(u_mid).T, fe.grad(v_u)) * fe.dx  # changed stress term
-                  - (nu + nu_t) * (2.0/3.0)*fe.inner(fe.div(u_mid) * fe.Identity(2), fe.grad(v_u)) * fe.dx
+                  + (nu + nu_t) * fe.inner(fe.grad(u_mid) + fe.grad(u_mid).T, fe.grad(v_u)) * fe.dx  # stress tensor
+                  - (nu + nu_t) * (2. / 3.) * fe.inner(fe.div(u_mid) * fe.Identity(2), fe.grad(v_u)) * fe.dx  # stress tensor
                   + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
                   + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_mid) * fe.dx  # friction term
-                  - fe.inner(self.f_u, v_u) * fe.dx - fe.inner(self.f_h, v_h) * fe.dx)
+                  - fe.inner(self.f_u, v_u) * fe.dx
+                  - fe.inner(self.f_h, v_h) * fe.dx)
 
         # add in continuity term
         if self.integrate_continuity_by_parts:
@@ -264,20 +262,19 @@ class ShallowTwo:
             self.bcs = [bc_u, bc_h]
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
-            # TODO: take in mesh parameterisations as argument
+            # set inflow, outflow, walls all via Dirichlet BC's
             u_in = fe.Constant((0.535, 0.))
+            u_out = u_in
             no_slip = fe.Constant((0., 0.))
 
             inflow = "near(x[0], 0)"
+            outflow = "near(x[0], 1)"
             walls = "near(x[1], 0) || near(x[1], 0.56)"
 
-            # u_out = u_in
-            # outflow = "near(x[0], 6)"
-            # bcu_outflow = fe.DirichletBC(self.W.sub(0), u_out, outflow)
-
             bcu_inflow = fe.DirichletBC(self.W.sub(0), u_in, inflow)
+            bcu_outflow = fe.DirichletBC(self.W.sub(0), u_out, outflow)
             bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
-            self.bcs = [bcu_inflow, bcu_walls]
+            self.bcs = [bcu_inflow, bcu_outflow, bcu_walls]
 
             # need to include surface integrals if we integrate by parts
             # only left and right boundaries matter, as the rest are zero (no-slip condition)
@@ -285,7 +282,7 @@ class ShallowTwo:
                 class LeftBoundary(fe.SubDomain):
                     def inside(self, x, on_boundary):
                         tol = 1E-14  # tolerance for coordinate comparisons
-                        return on_boundary and abs(x[0]) < tol
+                        return on_boundary and abs(x[0] - 0.) < tol
 
                 class RightBoundary(fe.SubDomain):
                     def inside(self, x, on_boundary):
@@ -300,14 +297,14 @@ class ShallowTwo:
                 n = fe.FacetNormal(self.mesh)
                 ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
                 self.F += (
-                    (self.H + h_mid) * fe.inner(u_mid, n) * v_h * ds(1)  # LHS just set via Dirichlet's
-                    + 0.  # no-normal flow conditions on the RHS
+                    (self.H + h_mid) * fe.inner(u_mid, n) * v_h * ds(1)  # LHS set via Dirichlet's
+                    + (self.H + h_mid) * fe.inner(u_mid, n) * v_h * ds(2)  # RHS also set via Dirichlet's
+                    + 0.  # all other conditions have no-normal/zero flow
                 )
 
             # TODO: take in cylinder mesh parameterisations as an argument/option
             # 0.925 is the centre of the domain
             if self.simulation == "cylinder":
-                # cylinder = "on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && x[1] >= 0.875 && x[1] <= 0.975"
                 cylinder = "on_boundary && x[0] >= 0.18 && x[0] <= 0.22 && x[1] >= 0.26 && x[1] <= 0.3"
                 self.bcs.append(
                     fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
@@ -321,7 +318,8 @@ class ShallowTwo:
         prm["nonlinear_solver"] = "snes"
         prm["snes_solver"]["line_search"] = "bt"
         prm["snes_solver"]["linear_solver"] = "gmres"
-        prm["snes_solver"]["preconditioner"] = "fieldsplit"
+        prm["snes_solver"]["preconditioner"] = "jacobi"
+        logger.info(f"using {prm['snes_solver']['linear_solver']} solver with {prm['snes_solver']['preconditioner']} PC")
 
         # solver convergence
         prm["snes_solver"]["relative_tolerance"] = 1e-7
