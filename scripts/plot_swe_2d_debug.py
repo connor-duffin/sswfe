@@ -14,7 +14,7 @@ def plot_fields_curr(swe, t, output_file):
 
     x, y = x_vertices[:, 0], x_vertices[:, 1]
 
-    fig, axs = plt.subplots(3, 1, constrained_layout=True, figsize=(9, 6))
+    fig, axs = plt.subplots(3, 1, constrained_layout=True, figsize=(9, 9))
     fig.suptitle(f"SWE solution fields at time t = {t:.5f}")
 
     im = axs[0].tricontourf(x, y, u1, 64)
@@ -37,6 +37,18 @@ def plot_fields_curr(swe, t, output_file):
     plt.close()
 
 
+class LeftBoundary(fe.SubDomain):
+    def inside(self, x, on_boundary):
+        tol = 1E-14  # tolerance for coordinate comparisons
+        return on_boundary and abs(x[0] - 0.) < tol
+
+
+class RightBoundary(fe.SubDomain):
+    def inside(self, x, on_boundary):
+        tol = 1E-14  # tolerance for coordinate comparisons
+        return on_boundary and abs(x[0] - 1.) < tol
+
+
 mesh_file = "mesh/channel-piggott.xdmf"
 checkpoint_file = "outputs/swe-channel-checkpoint.h5"
 swe = ShallowTwo(mesh=mesh_file,
@@ -47,8 +59,26 @@ swe = ShallowTwo(mesh=mesh_file,
                      "integrate_continuity_by_parts": True
                  })
 
-checkpoint = fe.HDF5File(swe.mesh.mpi_comm(), checkpoint_file, "r")
-vec_name = f"/du/vector_{100}"
-checkpoint.read(swe.du, vec_name)  # read into du
-t = checkpoint.attributes(vec_name)["timestamp"]
+Gamma_left = LeftBoundary()
+Gamma_left.mark(swe.boundaries, 1)  # mark with tag 1 for RHS
+Gamma_right = RightBoundary()
+Gamma_right.mark(swe.boundaries, 2)  # mark with tag 2 for RHS
+
+n = fe.FacetNormal(swe.mesh)
+ds = fe.Measure('ds', domain=swe.mesh, subdomain_data=swe.boundaries)
+
+for i in range(200):
+    checkpoint = fe.HDF5File(swe.mesh.mpi_comm(), checkpoint_file, "r")
+    vec_name = f"/du/vector_{i + 1}"
+    checkpoint.read(swe.du, vec_name)  # read into du
+    t = checkpoint.attributes(vec_name)["timestamp"]
+
+    # compute average h value
+    u, h = fe.split(swe.du)
+    # print(
+    #     fe.assemble(h * fe.dx) / fe.assemble(fe.Constant(1) * fe.dx(swe.mesh)))
+    print(fe.assemble(fe.inner(u, n) * ds(2)))
+
+# plot fields
+print(f"plotting at time {t:.5f}")
 plot_fields_curr(swe, t, "figures/fields-MPI.png")
