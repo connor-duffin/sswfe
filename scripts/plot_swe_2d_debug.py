@@ -50,7 +50,7 @@ class RightBoundary(fe.SubDomain):
 
 
 mesh_file = "mesh/channel-piggott.xdmf"
-checkpoint_file = "outputs/swe-channel-checkpoint.h5"
+checkpoint_file = "outputs/swe-channel-outflow-checkpoint.h5"
 swe = ShallowTwo(mesh=mesh_file,
                  control={
                      "dt": 5e-4,
@@ -67,7 +67,7 @@ Gamma_right.mark(swe.boundaries, 2)  # mark with tag 2 for RHS
 n = fe.FacetNormal(swe.mesh)
 ds = fe.Measure('ds', domain=swe.mesh, subdomain_data=swe.boundaries)
 
-for i in range(200):
+for i in range(100):
     checkpoint = fe.HDF5File(swe.mesh.mpi_comm(), checkpoint_file, "r")
     vec_name = f"/du/vector_{i + 1}"
     checkpoint.read(swe.du, vec_name)  # read into du
@@ -79,6 +79,6 @@ for i in range(200):
     #     fe.assemble(h * fe.dx) / fe.assemble(fe.Constant(1) * fe.dx(swe.mesh)))
     print(fe.assemble(fe.inner(u, n) * ds(2)))
 
-# plot fields
-print(f"plotting at time {t:.5f}")
-plot_fields_curr(swe, t, "figures/fields-MPI.png")
+    # plot fields
+    print(f"plotting at time {t:.5f}")
+    plot_fields_curr(swe, t, f"figures/fields-outflow/field-{i:05}.png")

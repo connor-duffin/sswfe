@@ -11,6 +11,8 @@
 \usepackage{newpxtext}
 \usepackage{inconsolata}
 
+\newtheorem{theorem}{Theorem}
+
 \input{/Users/connor/Documents/LaTeX/macros.tex}
 
 \title{Weak form for SWE}
@@ -23,8 +25,8 @@
 In this note we derive the weak form for the shallow water equations (SWE). The
 shallow water equations, in the non-conservative form, are given by
 \begin{gather*}
-  \partial_t \mb{u} + \mb{u} \cdot \nabla \mb{u} + g \nabla h - \nu \nabla^2 \mb{u} + C_D
-  \frac{\lVert \mb{u} \rVert_2 \mb{u}}{H + h} = 0, \\
+  \partial_t \mb{u} + \mb{u} \cdot \nabla \mb{u} + g \nabla h - \nu \nabla \cdot \mb{T} +
+  C_D \frac{\lVert \mb{u} \rVert_2 \mb{u}}{H + h} = 0, \\
   \partial_t h + \nabla \cdot \left( (H + h) \mb{u} \right) = 0,
 \end{gather*}
 where $\mb{u} := \mb{u}(x, y, t) = (u_1(x, y, t), u_2(x, y, t))$, $h := h(x, y, t)$.
@@ -36,241 +38,272 @@ behaviour on $\Gamma$. The parameters are given by
 \item $H$, the mean surface height.
 \item $C_D$, the friction coefficient.
 \item $\nu$, the kinematic viscosity.
+\item $\mb{T} = \nabla {\mb{u}} + \nabla{\mb{u}}^\top
+  - \frac{2}{3}\left(\nabla \cdot \mb{u} \right) \mb{I}$, the viscous stress
+  tensor for the (assumed) Newtonian fluid.
 \end{itemize}
 
-We first expand this system out in terms of the individual velocity components,
-$\mb{u} = (u_1, u_2)$, that we are solving for:
+Next we dot each equation by a test function, $\mb{v}(x, y) =
+(v_1(x, y), v_2(x, y))$, and integrate over the problem domain
+$\Omega$. This gives
 \begin{gather*}
-  \partial_t u_1 + \mb{u} \cdot \nabla u_1 + g \partial_x h - \nu \nabla^2 u_1 + C_D
-  \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 = 0, \\
-  \partial_t u_2 + \mb{u} \cdot \nabla u_2 + g \partial_y h - \nu \nabla^2 u_2 + C_D
-  \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 = 0, \\
-  \partial_t h + \nabla \cdot \left( (H + h) \mb{u} \right) = 0.
-\end{gather*}
-Next we multiply each equation by a test function, $\mb{v}(x, y) =
-(v_1(x, y), v_2(x, y), v_3(x, y))$, and integrate over the problem domain
-$\Omega$. This gives, for the first equation:
-\begin{gather*}
-  \int_\Omega \partial_t u_1 v_1 \, \dee \mb{x}
-  + \int_\Omega \mb{u} \cdot \nabla u_1 v_1 \, \dee \mb{x}
-  + \int_\Omega g \partial_x h v_1 \, \dee \mb{x}
-  - \int_\Omega \nu \nabla^2 u_1 v_1 \, \dee \mb{x}
-  + \int_\Omega C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1 \, \dee \mb{x} = 0
-\end{gather*}
-The only term which we will integrate by parts is the Laplacian term, as is
-standard in FEM. This gives
-\begin{gather*}
-  - \int_\Omega \nu \nabla^2 u_1 v_1 \, \dee \mb{x}
-  = \int_\Omega \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
-  - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s.
-\end{gather*}
-Now, depending on which boundary conditions are imposed, this term will drop out.
-However we leave it in for now to have a full weak form for the system. This
-gives the full weak form for the two velocity components as
-\begin{gather*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
-  - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s = 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
-  - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s = 0, \\
+  \int_\Omega \partial_t \mb{u} \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \left(\mb{u} \cdot \nabla \mb{u}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega g \nabla h \cdot \mb{v} \, \dee \mb{x}
+  - \int_\Omega \nu \left(\nabla \cdot \mb{T}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega C_D \frac{\lVert \mb{u} \rVert_2}{H + h} \mb{u} \cdot \mb{v} \, \dee \mb{x} = 0
 \end{gather*}
 
-Now for the surface height we, again, multiply by a testing function $v_3(x, y)$
+To reduce this further we need two results from~\cite{gonzalez2008first}. We
+state these here for completeness.
+
+\begin{theorem}
+  \label{thm:tensor-product-rule}
+  Suppose $\mb{S}$ and $\mb{a}$ are a second-order tensor field and a vector
+  field, respectively. Then
+  \[
+    \nabla \cdot (\mb{S}^\top \mb{a}) =
+    (\nabla \cdot \mb{S}) \cdot \mb{a} + \mb{S} : \nabla \mb{a},
+  \]
+  where $:$ denotes the tensor reduction operation.
+\end{theorem}
+
+\begin{theorem}
+  \label{thm:divergence}
+  (Divergence theorem) Let $\mb{a}$ be some arbitrary vector field which is
+  defined over a region $\Omega$, a subset set of $\mathbb{R}^2$. Then
+  \[
+    \int_\Omega \nabla \cdot \mb{a} \, \dee \mb{x} = 
+    \int_\Gamma \mb{a} \cdot \mb{n} \, \dee s.
+  \]
+\end{theorem}
+
+The only term which we will integrate by parts is the viscous stress term, as is
+standard in FEM. This gives, via the Theorems provided above:
+\begin{align*}
+  \int_\Omega \nu \left(\nabla \cdot \mb{T}\right) \cdot \mb{v} \, \dee \mb{x}
+  &= \nu \left( \int_\Omega \nabla \cdot (\mb{T}^\top \mb{v}) - \mb{T} : \nabla \mb{v} \, \dee \mb{x} \right) \\
+  &= \nu \left(\int_\Gamma (\mb{T}^\top \mb{v}) \cdot \mb{n} \, \dee s
+    - \int_\Omega \mb{T} : \nabla \mb{v} \, \dee \mb{x} \right) \\
+  &= \nu \int_\Gamma \mb{v} \cdot \mb{T} \mb{n} \, \dee s
+    - \nu \int_\Omega \mb{T} : \nabla \mb{v} \, \dee \mb{x}.
+\end{align*}
+Now, depending on which boundary conditions are imposed, the first term may drop
+out. In~\citep{jacobs2015firedrakefluids} it is assumed that this stress tensor
+is zero perpendicular to the boundary, so this term just drops out. However we
+leave it in for now to have a full weak form for the system. This gives the full
+weak form for the velocity components as
+\begin{gather*}
+  \int_\Omega \partial_t \mb{u} \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \left(\mb{u} \cdot \nabla \mb{u}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega g \nabla h \cdot \mb{v} \, \dee \mb{x} \\
+  + \int_\Omega \nu \mb{T} : \nabla \mb{v} \, \dee \mb{x}
+  + \int_\Omega C_D \frac{\lVert \mb{u} \rVert_2}{H + h} \mb{u} \cdot \mb{v} \, \dee \mb{x} \\
+  - \nu \int_\Gamma \mb{v} \cdot \mb{T} \mb{n} \, \dee s = 0
+\end{gather*}
+
+Now for the surface height we, again, multiply by a testing function $v(x, y)$
 and integrate over the domain $\Omega$:
 \[
-  \int_\Omega \partial_t h v_3 \, \dee \mb{x}
-  + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} = 0.
+  \int_\Omega \partial_t h v \, \dee \mb{x}
+  + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v \, \dee \mb{x} = 0.
 \]
 Depending on the prescribed boundary conditions this divergence term can be
 integrated by parts
 \[
-  \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x}
-  = - \int_\Omega \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
-  + \int_\Gamma v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s = 0.
+  \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v \, \dee \mb{x}
+  = - \int_\Omega \nabla v \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
+  + \int_\Gamma v ((H + h) \mb{u}) \cdot \mb{n} \, \dee s = 0.
 \]
 giving the weak form for the surface height as
 \[
-  \int_\Omega \partial_t h v_3
-   - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
-  + \int_\Gamma v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s = 0.
+  \int_\Omega \partial_t h v
+   - \nabla v \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
+  + \int_\Gamma v ((H + h) \mb{u}) \cdot \mb{n} \, \dee s = 0.
 \]
-
-If we do this integration-by-parts, the full weak form for the non-conservative
-shallow-water system is
-\begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
-  - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
-  - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t h v_3
-  - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
-  + \int_\Gamma v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s &= 0.
-\end{align*}
-Otherwise, if we just leave the divergence term as-is, we get
-\begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
-  - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
-  - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t h v_3 \, \dee \mb{x}
-  + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} &= 0.
-\end{align*}
-
-
-\subsection*{Specific weak form: MMS verification}
-
-For the MMS verification, we have the unit square domain
-$\Omega = [0, 1] \times [0, 1]$. On the boundaries $\Gamma$ we set
+Thus, the full system of the shallow water equations is:
 \begin{gather*}
-  \mb{u}(x, y, t) = (\cos(x)\sin(y), \sin(x^2) + \cos(y)), \\
-  h(x, y) = \sin(x)\sin(y),
+  \int_\Omega \partial_t \mb{u} \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \left(\mb{u} \cdot \nabla \mb{u}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega g \nabla h \cdot \mb{v} \, \dee \mb{x} \\
+  + \int_\Omega \nu \mb{T} : \nabla \mb{v} \, \dee \mb{x}
+  + \int_\Omega C_D \frac{\lVert \mb{u} \rVert_2}{H + h} \mb{u} \cdot \mb{v} \, \dee \mb{x}
+  - \nu \int_\Gamma \mb{v} \cdot \mb{T} \mb{n} \, \dee s = 0, \\
+  \int_\Omega \partial_t h v
+  - \nabla v \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
+  + \int_\Gamma v ((H + h) \mb{u}) \cdot \mb{n} \, \dee s = 0.
 \end{gather*}
-the manufactured solutions for this example. Therefore all the surface integrals
-drop out as all test functions are identically zero on $\Gamma$. For this
-example we also integrate the divergence term by parts, so that the weak form is
-\begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t h v_3
-  - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x} &= 0.
-\end{align*}
 
-The next thing we do is discretise the system in time, to give an interative
-updating procedure. So far I have mainly considered an implicit method. Letting
-the solution at time $n \Dt$ be $u^n := u^n(x, y) = u(x, y, n \Dt)$, this gives
-\begin{align*}
-  \int_\Omega
-  \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
-  + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
-  + g h_x^n \, v_1
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
-  + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
-  + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
-  + g h_y^n \, v_2
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
-  + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
-  - \nabla v_3 \cdot \left( (H + h^n) \mb{u}^n \right) \, \dee \mb{x} &= 0.
-\end{align*}
+\newpage
 
-\subsection*{Specific weak form: laminar flow in a channel}
+% \subsection*{Specific weak form: MMS}
+% \begin{align*}
+%   \int_\Omega
+%   \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
+%   + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
+%   - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
+%   + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
+%   - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t h v_3
+%   - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
+%   + \int_\Gamma v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s &= 0.
+% \end{align*}
+% Otherwise, if we just leave the divergence term as-is, we get
+% \begin{align*}
+%   \int_\Omega
+%   \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
+%   + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
+%   - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
+%   + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
+%   - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t h v_3 \, \dee \mb{x}
+%   + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} &= 0.
+% \end{align*}
 
-For the laminar flow in a channel, we consider the rectangular domain $\Omega =
-[0, d_x] \times [0, d_y]$. This gives us four boundaries: $\Gamma_L$,
-$\Gamma_R$, $\Gamma_T$, and $\Gamma_B$. These stand for the left, right, top and
-bottom boundaries. The BC's are:
-\[
-  \mb{u} =
-  \begin{cases}
-    (u_i, 0) & \mb{x} \in \Gamma_L \cup \Gamma_R, \\
-    (0, 0) & \mb{x} \in \Gamma_T \cup \Gamma_B,
-  \end{cases}
-\]
-So we have a specific inflow and outflow condition, and a no-slip condition on
-the top and bottom walls. On the $h$ component, there are no boundary
-conditions. Therefore, the weak form is
-\begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
-  - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
-  - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
-  \int_\Omega \partial_t h v_3
-  - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
-  + \int_{\Gamma_L} v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s
-  + \int_{\Gamma_R} v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s &= 0.
-\end{align*}
-Note that the surface integrals on the $\mb{u}$ weak forms have dropped out, but
-some of the surface integral terms from the $h$ component have remained in the
-system. These are on the inflow and outflow boundaries. As $\mb{u} = (0, 0)$ on
-$\Gamma_T$ and $\Gamma_B$, boundary integrals across these domains drop out of
-the system.
+% For the MMS verification, we have the unit square domain
+% $\Omega = [0, 1] \times [0, 1]$. On the boundaries $\Gamma$ we set
+% \begin{gather*}
+%   \mb{u}(x, y, t) = (\cos(x)\sin(y), \sin(x^2) + \cos(y)), \\
+%   h(x, y) = \sin(x)\sin(y),
+% \end{gather*}
+% the manufactured solutions for this example. Therefore all the surface integrals
+% drop out as all test functions are identically zero on $\Gamma$. For this
+% example we also integrate the divergence term by parts, so that the weak form is
+% \begin{align*}
+%   \int_\Omega
+%   \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
+%   + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
+%   + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \partial_t h v_3
+%   - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x} &= 0.
+% \end{align*}
 
-When we discretise this system in time, we get:
-\begin{align*}
-  \int_\Omega
-  \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
-  + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
-  + g h_x^n \, v_1
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
-  + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
-  + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
-  + g h_y^n \, v_2
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
-  + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
-  - \nabla v_3 \cdot \left( (H + h^n) \mb{u}^n \right) \, \dee \mb{x}
-  + \int_{\Gamma_L} v_3 ((H + h^n) \mb{u}^n) \cdot \mb{n} \, \dee s
-  + \int_{\Gamma_R} v_3 ((H + h^n) \mb{u}^n) \cdot \mb{n} \, \dee s &= 0.
-\end{align*}
+% The next thing we do is discretise the system in time, to give an interative
+% updating procedure. So far I have mainly considered an implicit method. Letting
+% the solution at time $n \Dt$ be $u^n := u^n(x, y) = u(x, y, n \Dt)$, this gives
+% \begin{align*}
+%   \int_\Omega
+%   \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
+%   + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
+%   + g h_x^n \, v_1
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
+%   + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
+%   + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
+%   + g h_y^n \, v_2
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
+%   + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
+%   - \nabla v_3 \cdot \left( (H + h^n) \mb{u}^n \right) \, \dee \mb{x} &= 0.
+% \end{align*}
 
-However, we can also use the weak form which does not integrate any terms by
-parts. In this instance we have
-\begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t h v_3 \, \dee \mb{x}
-  + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} &= 0.
-\end{align*}
-In this case the surface integrals drop out of the weak form as previously, but
-there are no boundary terms on the $h$-component weak form, so we just leave
-this as-is.
+% \subsection*{Specific weak form: laminar flow in a channel}
 
-Once again, the time-discretisation of this is:
-\begin{align*}
-  \int_\Omega
-  \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
-  + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
-  + g h_x^n \, v_1
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
-  + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
-  + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
-  + g h_y^n \, v_2
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
-  + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
-  + \int_\Omega \nabla \cdot \left( (H + h^n) \mb{u}^n \right) v_3 \, \dee \mb{x} &= 0.
-\end{align*}
+% For the laminar flow in a channel, we consider the rectangular domain $\Omega =
+% [0, d_x] \times [0, d_y]$. This gives us four boundaries: $\Gamma_L$,
+% $\Gamma_R$, $\Gamma_T$, and $\Gamma_B$. These stand for the left, right, top and
+% bottom boundaries. The BC's are:
+% \[
+%   \mb{u} =
+%   \begin{cases}
+%     (u_i, 0) & \mb{x} \in \Gamma_L \cup \Gamma_R, \\
+%     (0, 0) & \mb{x} \in \Gamma_T \cup \Gamma_B,
+%   \end{cases}
+% \]
+% So we have a specific inflow and outflow condition, and a no-slip condition on
+% the top and bottom walls. On the $h$ component, there are no boundary
+% conditions. Therefore, the weak form is
+% \begin{align*}
+%   \int_\Omega
+%   \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
+%   + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x}
+%   - \int_\Gamma v_1 \nabla u_1 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
+%   + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x}
+%   - \int_\Gamma v_2 \nabla u_2 \cdot \mb{n} \, \dee s &= 0, \\
+%   \int_\Omega \partial_t h v_3
+%   - \nabla v_3 \cdot \left( (H + h) \mb{u} \right) \, \dee \mb{x}
+%   + \int_{\Gamma_L} v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s
+%   + \int_{\Gamma_R} v_3 ((H + h) \mb{u}) \cdot \mb{n} \, \dee s &= 0.
+% \end{align*}
+% Note that the surface integrals on the $\mb{u}$ weak forms have dropped out, but
+% some of the surface integral terms from the $h$ component have remained in the
+% system. These are on the inflow and outflow boundaries. As $\mb{u} = (0, 0)$ on
+% $\Gamma_T$ and $\Gamma_B$, boundary integrals across these domains drop out of
+% the system.
+
+% When we discretise this system in time, we get:
+% \begin{align*}
+%   \int_\Omega
+%   \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
+%   + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
+%   + g h_x^n \, v_1
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
+%   + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
+%   + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
+%   + g h_y^n \, v_2
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
+%   + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
+%   - \nabla v_3 \cdot \left( (H + h^n) \mb{u}^n \right) \, \dee \mb{x}
+%   + \int_{\Gamma_L} v_3 ((H + h^n) \mb{u}^n) \cdot \mb{n} \, \dee s
+%   + \int_{\Gamma_R} v_3 ((H + h^n) \mb{u}^n) \cdot \mb{n} \, \dee s &= 0.
+% \end{align*}
+
+% However, we can also use the weak form which does not integrate any terms by
+% parts. In this instance we have
+% \begin{align*}
+%   \int_\Omega
+%   \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
+%   + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
+%   + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
+%   + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \partial_t h v_3 \, \dee \mb{x}
+%   + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} &= 0.
+% \end{align*}
+% In this case the surface integrals drop out of the weak form as previously, but
+% there are no boundary terms on the $h$-component weak form, so we just leave
+% this as-is.
+
+% Once again, the time-discretisation of this is:
+% \begin{align*}
+%   \int_\Omega
+%   \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
+%   + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
+%   + g h_x^n \, v_1
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
+%   + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
+%   + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
+%   + g h_y^n \, v_2
+%   + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
+%   + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
+%   \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
+%   + \int_\Omega \nabla \cdot \left( (H + h^n) \mb{u}^n \right) v_3 \, \dee \mb{x} &= 0.
+% \end{align*}
 
 
 \subsection*{Specific weak form: Flow past a cylinder}
 
 For the flow past a cylinder, we consider the rectangular domain
 $\Omega = [0, d_x] \times [0, d_y]$, with a cylinder in the domain removed. This
-gives us four boundaries for the rectangle, as previously: $(\Gamma_L, \Gamma_R,
-\Gamma_T, \Gamma_B)$. There is one additional boundary for the surface, which we
-call $\Gamma_{\mathrm{cyl}}$. The BC's are:
+gives us four boundaries for the rectangle: $(\Gamma_L, \Gamma_R, \Gamma_T,
+\Gamma_B)$. There is one additional boundary for the surface, which we
+call $\Gamma_{\mathrm{cyl}}$. The BC's are all Dirichlet BC's and are:
 \[
   \mb{u} =
   \begin{cases}
@@ -280,34 +313,60 @@ call $\Gamma_{\mathrm{cyl}}$. The BC's are:
 \]
 So we have a specific inflow and outflow condition, and a no-slip condition on
 the top and bottom walls, and on the cylinder. On the $h$ component, there are
-no boundary conditions. For this simulation we do not integrate the divergence
-term by parts. Therefore the weak form is
+no boundary conditions. For this simulation we integrate the divergence
+term by parts. 
 \begin{align*}
-  \int_\Omega
-  \partial_t u_1 v_1 +  \mb{u} \cdot \nabla u_1 v_1 +  g \partial_x h v_1
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_1 v_1
-  + \nu \nabla u_1 \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t u_2 v_2 +  \mb{u} \cdot \nabla u_2 v_2 +  g \partial_y h v_2
-  + C_D \frac{\lVert \mb{u} \rVert_2}{H + h} u_2 v_2
-  + \nu \nabla u_2 \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \partial_t h v_3 \, \dee \mb{x}
-  + \int_\Omega \nabla \cdot \left( (H + h) \mb{u} \right) v_3 \, \dee \mb{x} &= 0.
+  \int_\Omega \partial_t \mb{u} \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \left(\mb{u} \cdot \nabla \mb{u}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega g \nabla h \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \nu \mb{T} : \nabla \mb{v} \, \dee \mb{x}
+  + \int_\Omega C_D \frac{\lVert \mb{u} \rVert_2}{H + h} \mb{u} \cdot \mb{v} \, \dee \mb{x} = 0, \\
+  \int_\Omega \partial_t h v
+  - (H + h) \nabla v \cdot \mb{u} \dee \mb{x}
+  + \int_{\Gamma_L} v (H + h) \mb{u} \cdot \mb{n} \, \dee s
+  + \int_{\Gamma_R} v (H + h) \mb{u} \cdot \mb{n} \, \dee s = 0.
 \end{align*}
+As we prescribe all Dirichlet BC's for $\mb{u}$ vector fields, the boundary term
+for the stress tensor drops out. Boundary terms from the continuity equation
+which are not the inlet and outlet also drop out due to the no-slip conditions.
+
 Which, upon completing a time discretisation, gives
 \begin{align*}
-  \int_\Omega
-  \left(\frac{ u_1^n - u_1^{n - 1}}{\Dt} \right) v_1
-  + \mb{u}^{n - 1} \cdot \nabla u_1^n \, v_1
-  + g h_x^n \, v_1
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_1^n \, v_1
-  + \nu \nabla u_1^n \cdot \nabla v_1 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{u_2^n - u_2^{n - 1}}{\Dt} \right) v_2
-  + \mb{u}^{n - 1} \cdot \nabla u_2^n \, v_2
-  + g h_y^n \, v_2
-  + C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} u_2^n \, v_2
-  + \nu \nabla u_2^n \cdot \nabla v_2 \, \dee \mb{x} &= 0, \\
-  \int_\Omega \left( \frac{h^n - h^{n - 1}}{\Dt} \right) v_3
-  + \int_\Omega \nabla \cdot \left( (H + h^n) \mb{u}^n \right) v_3 \, \dee \mb{x} &= 0.
+  \int_\Omega \left(\frac{\mb{u}^n - \mb{u}^{n - 1}}{\Delta_t}\right) \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \left(\mb{u}^n \cdot \nabla \mb{u}^n \right) \cdot \mb{v} \, \dee \mb{x} \\
+  + \int_\Omega g \nabla h^n \cdot \mb{v} \, \dee \mb{x}
+  + \int_\Omega \nu \mb{T}^n : \nabla \mb{v} \, \dee \mb{x}
+  + \int_\Omega C_D \frac{\lVert \mb{u}^{n - 1} \rVert_2}{H + h^n} \mb{u}^n \cdot \mb{v} \, \dee \mb{x} &= 0, \\
+  \int_\Omega \left(\frac{h^n - h^{n - 1}}{\Delta_t}\right) v - (H + h^n) \mb{u}^n \cdot \nabla v \dee \mb{x}
+  + \int_{\Gamma_L} v (H + h^n) \mb{u}^n \cdot \mb{n} \, \dee s
+  + \int_{\Gamma_R} v (H + h^n) \mb{u}^n \cdot \mb{n} \, \dee s &= 0.
 \end{align*}
+
+\subsubsection*{Large eddy simulation addition}
+
+When solving the SWE in this setting we need to include an additional term on
+the kinematic viscosity in order to model viscous effects which arise to eddies
+in the solution domain, which are not resolved due to large grid sizes. In this
+we use the Smagorinsky LES which adds in an additional viscosity coefficient,
+$\nu_t$, to the viscosity coefficient $\nu$ in the equations above. This is
+given by
+\[
+  \nu_t = (C_s \Delta_h)^2 \left| \mb{S} \right|,
+\]
+where $C_s$ is the Smagorinsky coefficient, $\Delta_h$ is the square root of the
+area of each local element, and the modulus of the strain tensor is
+\[
+  \mb{S} = \frac{1}{2}\left( \nabla \mb{u} + \nabla \mb{u}^\top \right),
+  \left| \mb{S} \right| = \sqrt{2 \sum_{i,j} \mb{S}_{ij}^2}.
+\]
+Note that this coefficient is proportional to the gradient of the velocity field
+and the area of the elements (less refined meshes give higher values of $\nu_t$).
+
+
+
+
+
+\bibliographystyle{dcu}
+\bibliography{/Users/connor/Documents/LaTeX/master.bib}
 
 \end{document}

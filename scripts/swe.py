@@ -155,6 +155,8 @@ class ShallowTwo:
         self.theta = control["theta"]
         self.simulation = control["simulation"]
         self.integrate_continuity_by_parts = control["integrate_continuity_by_parts"]
+        self.use_laplacian = control["laplacian"]
+        self.use_les = control["les"]
 
         if type(mesh) == str:
             # read mesh from file
@@ -216,18 +218,26 @@ class ShallowTwo:
         h_mid = self.theta * h + (1 - self.theta) * h_prev
         u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
 
-        self.les = LES(mesh=self.mesh, fs=self.H_space, u=u_mid, density=1.0, smagorinsky_coefficient=0.164)
-        nu_t = self.les.eddy_viscosity
-
         self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
                   + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
                   + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
-                  + (nu + nu_t) * fe.inner(fe.grad(u_mid) + fe.grad(u_mid).T, fe.grad(v_u)) * fe.dx  # stress tensor
-                  - (nu + nu_t) * (2. / 3.) * fe.inner(fe.div(u_mid) * fe.Identity(2), fe.grad(v_u)) * fe.dx  # stress tensor
-                  + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
                   + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_mid) * fe.dx  # friction term
+                  + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
                   - fe.inner(self.f_u, v_u) * fe.dx
                   - fe.inner(self.f_h, v_h) * fe.dx)
+
+        # add in (parameterised) dissipation effects
+        if self.use_laplacian:
+            self.F += nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # stress tensor
+        else:
+            if self.use_les:
+                self.les = LES(mesh=self.mesh, fs=self.H_space, u=u_mid, density=1.0, smagorinsky_coefficient=0.164)
+                nu_t = self.les.eddy_viscosity
+            else:
+                nu_t = 0.
+
+            self.F += ((nu + nu_t) * fe.inner(fe.grad(u_mid) + fe.grad(u_mid).T, fe.grad(v_u)) * fe.dx  # stress tensor
+                       - (nu + nu_t) * (2. / 3.) * fe.inner(fe.div(u_mid) * fe.Identity(2), fe.grad(v_u)) * fe.dx)  # stress tensor
 
         # add in continuity term
         if self.integrate_continuity_by_parts:

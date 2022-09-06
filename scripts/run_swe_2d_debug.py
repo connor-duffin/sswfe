@@ -15,12 +15,14 @@ swe = ShallowTwo(mesh=mesh_file,
                      "dt": 5e-4,
                      "theta": 1,
                      "simulation": "cylinder",
-                     "integrate_continuity_by_parts": True
+                     "integrate_continuity_by_parts": True,
+                     "laplacian": False,
+                     "les": True
                  })
 swe.setup_checkpoint(checkpoint_file)
 
 t = 0.
-nt = 30_001
+nt = 3_001
 nt_thin = 100
 for i in range(nt):
     if i % nt_thin == 0:
