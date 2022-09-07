@@ -388,7 +388,7 @@ class ShallowTwo:
         # solve at current time
         self.solver.solve()
 
-        # solve for the current timestep
+        # set previous timesteps appropriately
         if imex:
             fe.assign(self.du_prev_prev, self.du_prev)
 

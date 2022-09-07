@@ -1,5 +1,6 @@
 import logging
 
+from argparse import ArgumentParser
 import fenics as fe
 from swe import ShallowTwo
 
@@ -8,25 +9,32 @@ logging.basicConfig(level=logging.INFO)
 comm = fe.MPI.comm_world
 rank = comm.rank
 
+IMEX = False
+
+parser = ArgumentParser()
+parser.add_argument("--theta", type=float, default=0.5)
+args = parser.parse_args()
+
 mesh_file = "mesh/channel-piggott.xdmf"
-checkpoint_file = "outputs/swe-channel-outflow-checkpoint.h5"
 swe = ShallowTwo(mesh=mesh_file,
                  control={
-                     "dt": 5e-4,
-                     "theta": 0.5,
+                     "dt": 1e-3,
+                     "theta": args.theta,
                      "simulation": "cylinder",
                      "integrate_continuity_by_parts": True,
                      "laplacian": False,
                      "les": True
                  })
+checkpoint_file = f"outputs/swe-channel-alt-ts-theta-{args.theta:.1f}-checkpoint.h5"
+logging.info("storing solution at %s", checkpoint_file)
+swe.setup_checkpoint(checkpoint_file)
 
 t = 0.
 nt = 1001
 nt_thin = 100
-imex = False
 
-# solves for du_prev
-if imex:
+# solves for du_prev, from du_prev_prev
+if IMEX:
     F, J = swe.setup_form(swe.du_prev, swe.du_prev_prev, imex=False)
     bcs, F = swe.setup_bcs(F)
     solver = swe.setup_solver(F, swe.du_prev, bcs, J)
@@ -34,19 +42,36 @@ if imex:
         swe.les.solve()
 
     solver.solve()
+    t += swe.dt
 
-# F, J = swe.setup_form(swe.du, swe.du_prev, swe.du_prev_prev, imex=False)
-F, J = swe.setup_form(swe.du, swe.du_prev, swe.du_prev_prev, imex=imex)
+F, J = swe.setup_form(swe.du, swe.du_prev, swe.du_prev_prev, imex=IMEX)
 bcs, F = swe.setup_bcs(F)
 solver = swe.setup_solver(F, swe.du, bcs, J)
+
 for i in range(nt):
-    print(i)
-    if swe.use_les:
-        swe.les.solve()
+    if i % nt_thin == 0:
+        _, h = fe.split(swe.du)
+        h_average = fe.assemble(h * fe.dx) / fe.assemble(fe.Constant(1) * fe.dx(swe.mesh))
+        if rank == 0:
+            logging.info("average height: %.5f", h_average)
+            logging.info("storing solution at time %.5f, iteration %d of %d complete",
+                         t, i + 1, nt)
+        swe.checkpoint_save(t)
 
-    solver.solve()
+    try:
+        if swe.use_les:
+            swe.les.solve()
 
-    # set previous terms
-    if imex:
-        fe.assign(swe.du_prev_prev, swe.du_prev)
-    fe.assign(swe.du_prev, swe.du)
+        solver.solve()
+
+        # set previous terms
+        if IMEX:
+            fe.assign(swe.du_prev_prev, swe.du_prev)
+
+        fe.assign(swe.du_prev, swe.du)
+        t += swe.dt
+    except RuntimeError:
+        print(f"SOLVER FAILED AT TIME {t:.5f}")
+        swe.checkpoint_save(t)
+        break
+
