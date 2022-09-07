@@ -13,7 +13,7 @@ checkpoint_file = "outputs/swe-channel-outflow-checkpoint.h5"
 swe = ShallowTwo(mesh=mesh_file,
                  control={
                      "dt": 5e-4,
-                     "theta": 1,
+                     "theta": 0.5,
                      "simulation": "cylinder",
                      "integrate_continuity_by_parts": True,
                      "laplacian": False,
