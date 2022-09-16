@@ -71,6 +71,8 @@ class ShallowOne:
 
         self.x_coords = self.mesh.coordinates()
         self.x_dofs = self.W.tabulate_dof_coordinates()
+        self.n_dofs = self.x_dofs.shape[0]
+
         self.u_dofs = self.W.sub(0).dofmap().dofs()
         self.h_dofs = self.W.sub(1).dofmap().dofs()
 
@@ -105,7 +107,7 @@ class ShallowOne:
         C = fe.Constant(self.C)
         dt = fe.Constant(self.dt)
 
-        self.theta = 1.0
+        self.theta = control["theta"]
         u_mid = self.theta * u + (1 - self.theta) * u_prev
         h_mid = self.theta * h + (1 - self.theta) * h_prev
         u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
