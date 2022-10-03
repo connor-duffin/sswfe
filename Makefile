@@ -5,6 +5,11 @@ rsb:
 		cambox:/home/cpd32@ad.eng.cam.ac.uk/projects/20220609-swfe/figures/ \
 		/Users/connor/Projects/statfluids/20220609-swfe/figures/
 
+rsd:
+		rsync -avzz \
+		cambox:/home/cpd32@ad.eng.cam.ac.uk/projects/20220609-swfe/docs/ \
+		/Users/connor/Projects/statfluids/20220609-swfe/docs/
+
 
 # meshes
 # ------
