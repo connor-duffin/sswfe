@@ -41,7 +41,7 @@ class PiecewiseIC(fe.UserExpression):
 
 
 class ShallowOne:
-    def __init__(self, control):
+    def __init__(self, control, params):
         # settings: L, nu, C
         self.nx = control["nx"]
         self.dt = control["dt"]
@@ -49,14 +49,17 @@ class ShallowOne:
 
         if self.simulation == "dam_break":
             self.L = 2000
-            self.nu = 1.0
+            # self.nu = 1.0
             self.C = 0.
         elif self.simulation == "tidal_flow":
             self.L = 14_000
-            self.nu = 1.0
+            # self.nu = 1.0
             self.C = 0.
         else:
             raise ValueError("Simulation steup not recognised")
+
+        # read in parameter values
+        self.nu = params["nu"]
 
         # setup mesh and function spaces
         self.mesh = fe.IntervalMesh(self.nx, 0., self.L)
@@ -164,6 +167,10 @@ class ShallowOne:
 
         fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
         fe.assign(self.du_prev, self.du)
+
+    def compute_energy(self):
+        u, h = fe.split(self.du)
+        return fe.assemble(u**2 * fe.dx)
 
 
 class ShallowTwo:

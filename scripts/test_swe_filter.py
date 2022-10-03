@@ -14,14 +14,18 @@ from swe_filter import ShallowOneEx
 
 def test_1d_filter():
     control = {"nx": 32, "dt": 1., "theta": 1.0, "simulation": "tidal_flow"}
-    stat_params = {"rho": 1e-2, "ell": 100}
-    swe = ShallowOneEx(control, stat_params, lr=False)
+    params = {"nu": 1.}
+    stat_params = {"h_cov": {"rho": 1e-2, "ell": 5000.},
+                   "u_cov": {"rho": 0., "ell": 5000.}}
+    swe = ShallowOneEx(control, params, stat_params, lr=False)
 
     # check covariance initialisation
     u, v = fe.TrialFunction(swe.H_space), fe.TestFunction(swe.H_space)
     M = fe.assemble(fe.inner(u, v) * fe.dx)
     M = dolfin_to_csr(M)
-    K = sq_exp_covariance(swe.x_dofs_h, stat_params["rho"], stat_params["ell"])
+    K = sq_exp_covariance(swe.x_dofs_h,
+                          stat_params["h_cov"]["rho"],
+                          stat_params["h_cov"]["ell"])
     G = M @ K @ M.T
 
     for row, idx in enumerate(swe.h_dofs):
@@ -37,7 +41,7 @@ def test_1d_filter():
     assert u_test.shape[0] == swe.n_dofs
     swe.du.vector().set_local(u_test)
     swe.cov[:] = cov_test
-    swe.set_prev(cov=True)
+    swe.set_prev()
     assert_allclose(swe.du_prev.vector().get_local(), u_test)
     assert_allclose(swe.cov_prev, cov_test)
 
@@ -57,3 +61,24 @@ def test_1d_filter():
         assert swe.J_scipy.nnz == jacobian_alt.nnz
         assert_allclose(swe.J_scipy.indices, jacobian_alt.indices)
         assert_allclose(swe.J_scipy.indptr, jacobian_alt.indptr)
+
+
+def test_1d_filter_lr():
+    control = {"nx": 32, "dt": 1., "theta": 1.0, "simulation": "tidal_flow"}
+    params = {"nu": 1.}
+    stat_params = {"h_cov": {"rho": 1e-2, "ell": 5000.},
+                   "u_cov": {"rho": 0., "ell": 5000.},
+                   "k_init": 16, "k": 16}
+    swe = ShallowOneEx(control, params, stat_params, lr=True)
+
+    # check that real
+    assert np.all(np.isreal(swe.G_vals))
+    assert np.all(np.isreal(swe.G_vecs))
+
+    # check dimensions
+    assert swe.cov_sqrt_pred.shape == (98, 32)
+    assert swe.cov_sqrt_prev.shape == (98, 16)
+    assert swe.cov_sqrt.shape == (98, 16)
+
+    # TODO: unit test update steps
+    swe.prediction_step(0.)

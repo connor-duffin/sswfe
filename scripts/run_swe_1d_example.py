@@ -38,7 +38,7 @@ for i in range(nt):
     t += swe.dt
     swe.solve(t)
     u_out[i, :] = swe.du.compute_vertex_values()[:(control["nx"] + 1)]
-    h_out[i, :] += swe.du.compute_vertex_values()[(control["nx"] + 1):]
+    h_out[i, :] = swe.du.compute_vertex_values()[(control["nx"] + 1):]
 
 fig, ax = plt.subplots()
 ax.set_ylim(u_lim)
