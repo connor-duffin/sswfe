@@ -11,6 +11,24 @@ rsd:
 		/Users/connor/Projects/statfluids/20220609-swfe/docs/
 
 
+# 1d tidal flow
+# -------------
+tidal_output_dir = outputs/swe-tidal
+nus = 100.0 1e-1 5e-2 4e-2 3e-2 2.5e-2 2e-2 1e-2
+tidal_1d_output_files = $(foreach nu,$(nus),$(tidal_output_dir)/1d-nu-$(nu).h5)
+
+$(tidal_output_dir)/1d-nu-%.h5: scripts/run_swe_1d_tidal.py
+		python3 $< \
+				--nu $* --output_file $@ \
+				--nx 400 --dt 4.0 --n_cycles 50 --nt_save 100
+
+all_tidal_1d_outputs: $(tidal_1d_output_files)
+		@echo $(tidal_1d_output_files)
+
+clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
+		rm -f $(tidal_1d_output_files)
+
+
 # meshes
 # ------
 mesh/channel.msh:

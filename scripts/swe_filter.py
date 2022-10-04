@@ -136,6 +136,8 @@ class ShallowOneEx(ShallowOne):
     def assemble_derivatives(self):
         fe.assemble(self.J, self.J_mat)
         fe.assemble(self.J_prev, self.J_prev_mat)
+
+        # TODO: check application of temporally-varying BC
         for J in [self.J_mat, self.J_prev_mat]:
             for bc in self.bcs: bc.apply(J)
 

@@ -160,6 +160,10 @@ class ShallowOne:
     def tidal_bc(t):
         return 4 - 4 * np.sin(np.pi * ((4 * t) / 86_400 + 0.5))
 
+    def compute_energy(self):
+        u, h = fe.split(self.du)
+        return fe.assemble(u**2 * fe.dx)
+
     def solve(self, t):
         if self.simulation == "tidal_flow":
             self.bcs[0] = fe.DirichletBC(self.W.sub(1), self.tidal_bc(t),
@@ -168,9 +172,17 @@ class ShallowOne:
         fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
         fe.assign(self.du_prev, self.du)
 
-    def compute_energy(self):
-        u, h = fe.split(self.du)
-        return fe.assemble(u**2 * fe.dx)
+    def setup_checkpoint(self, checkpoint_file):
+        """ Set up the checkpoint file, writing the appropriate things etc. """
+        logger.info(f"storing outputs in {checkpoint_file}")
+        self.checkpoint = fe.HDF5File(self.mesh.mpi_comm(), checkpoint_file, "w")
+
+    def checkpoint_save(self, t):
+        """ Save the simulation at the current time. """
+        self.checkpoint.write(self.du, "/du", t)
+
+    def checkpoint_close(self):
+        self.checkpoint.close()
 
 
 class ShallowTwo:
@@ -438,14 +450,3 @@ class ShallowTwo:
 
     def checkpoint_close(self):
         self.checkpoint.close()
-
-# forcing function for MMS
-# f_u_exact = fe.Expression((
-#     "cos(x[0]) * (cos(x[1]) * (cos(x[1]) + sin(pow(x[0], 2))) + sin(x[1])*(11.0 - sin(x[0])*sin(x[1]) + (0.0025 * sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2)))/(50.0 + sin(x[0])*sin(x[1]))))",
-#     "-1.2*cos(pow(x[0], 2)) + 0.6*cos(x[1]) + 9.8*cos(x[1])*sin(x[0]) + 2.4 * pow(x[0], 2) * sin(pow(x[0], 2)) + 2*x[0]*cos(x[0])*cos(pow(x[0], 2))*sin(x[1]) - (cos(x[1]) + sin(pow(x[0], 2)))*sin(x[1]) + (0.0025*sqrt(pow(cos(x[1]) + sin(pow(x[0], 2)), 2) + pow(cos(x[0])*sin(x[1]), 2))*(cos(x[1]) + sin(pow(x[0], 2))))/(50.0 + sin(x[0])*sin(x[1]))"),
-#     degree=4)
-# f_h_exact = fe.Expression(
-#     "cos(x[1]) * sin(x[0]) * (cos(x[1]) + sin(pow(x[0], 2))) - 50*(1 + sin(x[0]))*sin(x[1]) + (cos(2*x[0]) - sin(x[0]))*pow(sin(x[1]), 2)",
-#     degree=4)
-# self.f_u.assign(f_u_exact)
-# self.f_h.interpolate(f_h_exact)
