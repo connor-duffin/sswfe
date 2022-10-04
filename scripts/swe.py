@@ -56,7 +56,7 @@ class ShallowOne:
             # self.nu = 1.0
             self.C = 0.
         else:
-            raise ValueError("Simulation steup not recognised")
+            raise ValueError("Simulation setup not recognised")
 
         # read in parameter values
         self.nu = params["nu"]
@@ -73,6 +73,7 @@ class ShallowOne:
         W = self.W = fe.FunctionSpace(self.mesh, TH)
 
         self.x_coords = self.mesh.coordinates()
+        self.n_vertices = len(self.x_coords)
         self.x_dofs = self.W.tabulate_dof_coordinates()
         self.n_dofs = self.x_dofs.shape[0]
 
@@ -98,6 +99,7 @@ class ShallowOne:
             self.H = fe.interpolate(H, V)
 
         self.du = fe.Function(W)
+        self.du_vertices = np.copy(self.du.compute_vertex_values())
         u, h = fe.split(self.du)
 
         self.du_prev = fe.Function(W)
@@ -171,6 +173,17 @@ class ShallowOne:
 
         fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
         fe.assign(self.du_prev, self.du)
+
+    def set_curr_vector(self, du_vec):
+        self.du.vector().set_local(du_vec)
+
+    def set_prev_vector(self, du_vec):
+        self.du_prev.vector().set_local(du_vec)
+
+    def get_vertex_values(self):
+        self.du_vertices[:] = self.du.compute_vertex_values()
+        return (self.du_vertices[:self.n_vertices],
+                self.du_vertices[self.n_vertices:])
 
     def setup_checkpoint(self, checkpoint_file):
         """ Set up the checkpoint file, writing the appropriate things etc. """
@@ -366,7 +379,7 @@ class ShallowTwo:
                 bcs.append(
                     fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
-            return bcs, F
+        return bcs, F
 
     def setup_solver(self, F, du, bcs, J):
         problem = fe.NonlinearVariationalProblem(F, du, bcs=bcs, J=J)
