@@ -42,7 +42,6 @@ class PiecewiseIC(fe.UserExpression):
 
 class ShallowOne:
     def __init__(self, control, params):
-        # settings: L, nu, C
         self.nx = control["nx"]
         self.dt = control["dt"]
         self.simulation = control["simulation"]
@@ -117,13 +116,13 @@ class ShallowOne:
         h_mid = self.theta * h + (1 - self.theta) * h_prev
         u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
 
-        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx +
-                  fe.inner(h - h_prev, v_h) / dt * fe.dx +
-                  u_prev * u_mid.dx(0) * v_u * fe.dx +
-                  nu * 2 * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx +
-                  g * h_mid.dx(0) * v_u * fe.dx + C * u_mag * u_mid * v_u /
-                  (self.H + h_mid) * fe.dx -
-                  ((self.H + h_mid) * u_mid * v_h.dx(0)) * fe.dx)
+        self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx
+                  + u_prev * u_mid.dx(0) * v_u * fe.dx
+                  + nu * 2 * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx
+                  + g * h_mid.dx(0) * v_u * fe.dx
+                  + C * u_mag * u_mid / (self.H + h_mid) * v_u * fe.dx
+                  + fe.inner(h - h_prev, v_h) / dt * fe.dx
+                  - (self.H + h_mid) * u_mid * v_h.dx(0) * fe.dx)
         self.J = fe.derivative(self.F, self.du)
 
         def _right(x, on_boundary):
