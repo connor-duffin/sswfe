@@ -4,12 +4,7 @@ import numpy as np
 import fenics as fe
 
 from numpy.testing import assert_allclose
-from swe import ShallowOne, ShallowTwo
-
-# @pytest.fixture
-# def swe_1d():
-#     control = {"nx": 32, "dt": 0.02}
-#     return ShallowOne(control)
+from swe import ShallowOneLinear, ShallowOne, ShallowTwo, BumpTopo
 
 
 @pytest.fixture
@@ -24,6 +19,39 @@ def swe_2d():
         "les": False
     }
     return ShallowTwo(mesh, control)
+
+
+def test_shallowone_linear_init():
+    control = {"nx": 32, "dt": 0.02, "theta": 1.0}
+    params = {"nu": 1.0}
+
+    swe = ShallowOneLinear(control, params)
+    assert len(swe.x_dofs_u) == 65
+    assert len(swe.x_dofs_h) == 33
+    assert len(swe.x_coords) == 33
+
+    # check bilinear form stuff
+    # a, L = fe.lhs(swe.F), fe.rhs(swe.F)
+    # assert swe.a == a
+    # assert L == swe.L
+
+    # check that topo is set OK
+    H = swe.H.compute_vertex_values()
+    H_true = np.zeros_like(swe.x_coords)
+    for i in range(len(H_true)):
+        BumpTopo(swe.L).eval(H_true[i], swe.x_coords[i])
+
+    np.testing.assert_allclose(H, H_true.flatten())
+
+    # check that initial DOFs are set OK
+    u_prev, h_prev = swe.get_vertex_values_prev()
+    np.testing.assert_allclose(u_prev, 0.)
+    np.testing.assert_allclose(
+        h_prev,
+        np.exp(-(2 * (swe.x_coords[:, 0] - 10))**2) / 40)
+
+    # and run solve just to check that things work OK
+    swe.solve()
 
 
 def test_shallowone_init():
