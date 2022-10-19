@@ -81,7 +81,7 @@ for output_file in tqdm(output_files):
 du = xr.merge(u_ds)
 dh = xr.merge(h_ds)
 
-# first we plt to get an idea of dims
+#bump- first we plt to get an idea of dims
 dh.h.isel(t=slice(0, 300, 30)).plot(x="x", hue="nu", col="t", col_wrap=5, sharey="row")
 plt.show()
 

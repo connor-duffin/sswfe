@@ -182,13 +182,10 @@ class ShallowOne:
 
         if self.simulation == "dam_break":
             self.L = 2000
-            self.C = 0.
         elif self.simulation == "tidal_flow":
             self.L = 14_000
-            self.C = 0.
         elif self.simulation == "immersed_bump":
             self.L = 25.
-            self.C = 0.
         else:
             raise ValueError("Simulation setup not recognised")
 
@@ -247,21 +244,17 @@ class ShallowOne:
 
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
-        C = fe.Constant(self.C)
         dt = fe.Constant(self.dt)
 
         self.theta = control["theta"]
         u_theta = self.theta * u + (1 - self.theta) * u_prev
         h_theta = self.theta * h + (1 - self.theta) * h_prev
-        u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
-
         self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx
                   + u_prev * u_theta.dx(0) * v_u * fe.dx
                   + nu * 2 * fe.inner(fe.grad(u_theta), fe.grad(v_u)) * fe.dx
                   + g * h_theta.dx(0) * v_u * fe.dx
-                  + C * u_mag * u_theta / (self.H + h_theta) * v_u * fe.dx
                   + fe.inner(h - h_prev, v_h) / dt * fe.dx
-                  - (self.H + h_theta) * u_theta * v_h.dx(0) * fe.dx)
+                  + ((self.H + h_theta) * u_theta).dx(0) * v_h * fe.dx)
         self.J = fe.derivative(self.F, self.du)
 
         def _right(x, on_boundary):
