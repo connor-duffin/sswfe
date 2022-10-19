@@ -6,7 +6,7 @@ import fenics as fe
 from numpy.testing import assert_allclose
 from scipy.sparse import csr_matrix
 
-from statfenics.covariance import sq_exp_covariance
+from statfenics.covariance import sq_exp_covariance, sq_exp_evd, sq_exp_evd_hilbert
 from statfenics.utils import dolfin_to_csr
 
 from swe_filter import ShallowOneEx, ShallowOneKalman
@@ -23,11 +23,6 @@ def test_1d_linear_filter():
     du = fe.Function(swe.W)
     du_prev = fe.Function(swe.W)
     v_u, v_h = fe.TestFunctions(swe.W)
-
-    # fe.assign(du_prev.sub(1),
-    #           fe.interpolate(
-    #               fe.Expression("exp(- pow(2 * (x[0] - 10), 2)) / 80",
-    #                             degree=2), swe.H_space))
 
     u, h = fe.split(du)
     u_prev, h_prev = fe.split(du_prev)
@@ -101,19 +96,71 @@ def test_1d_nonlinear_filter():
 def test_1d_filter_lr():
     control = {"nx": 32, "dt": 1., "theta": 1.0, "simulation": "tidal_flow"}
     params = {"nu": 1.}
-    stat_params = {"h_cov": {"rho": 1e-2, "ell": 5000.},
+    stat_params = {"h_cov": {"rho": 1., "ell": 5000.},
                    "u_cov": {"rho": 0., "ell": 5000.},
-                   "k_init": 16, "k": 16}
+                   "k_init_u": 16,
+                   "k_init_h": 16,
+                   "k": 16,
+                   "hilbert_gp": False}
     swe = ShallowOneEx(control, params, stat_params, lr=True)
-
-    # check that real
-    assert np.all(np.isreal(swe.G_vals))
-    assert np.all(np.isreal(swe.G_vecs))
+    u, v = fe.TrialFunction(swe.W), fe.TestFunction(swe.W)
+    M = fe.assemble(fe.inner(u, v) * fe.dx)
+    M_scipy = dolfin_to_csr(M)
 
     # check dimensions
-    assert swe.cov_sqrt_pred.shape == (98, 32)
+    assert swe.cov_sqrt_pred.shape == (98, 48)
     assert swe.cov_sqrt_prev.shape == (98, 16)
     assert swe.cov_sqrt.shape == (98, 16)
 
     # TODO: unit test update steps
     swe.prediction_step(0.)
+
+    # first, check that full construction ensures zeros where needed
+    G_full = np.zeros((swe.mean.shape[0], swe.mean.shape[0]))
+    Kh_vals, Kh_vecs = sq_exp_evd(swe.x_dofs_h,
+                                  stat_params["h_cov"]["rho"],
+                                  stat_params["h_cov"]["ell"],
+                                  k=swe.k_init_h)
+    G_full[np.ix_(swe.h_dofs, swe.h_dofs)] = (
+        Kh_vecs @ np.diag(Kh_vals) @ Kh_vecs.T)
+    G_full[:] = M_scipy @ G_full @ M_scipy.T
+
+    np.testing.assert_allclose(swe.G_sqrt[:, :swe.k_init_h], 0.)
+    np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
+    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, :], 0.)
+
+    # now test hilbert-GP additions
+    stat_params.update(hilbert_gp=True)
+    swe = ShallowOneEx(control, params, stat_params, lr=True)
+    Kh_vals, Kh_vecs = sq_exp_evd_hilbert(swe.H_space, swe.k_init_h,
+                                          stat_params["h_cov"]["rho"],
+                                          stat_params["h_cov"]["ell"])
+
+    G_full[:] = 0.
+    G_full[np.ix_(swe.h_dofs, swe.h_dofs)] = (
+        Kh_vecs @ np.diag(Kh_vals) @ Kh_vecs.T)
+    G_full[:] = M_scipy @ G_full @ M_scipy.T
+
+    np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
+    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, :], 0.)
+
+    # and do the same with zero correlations on the `u` scale
+    stat_params["u_cov"].update(rho=1.)
+    swe = ShallowOneEx(control, params, stat_params, lr=True)
+    Ku_vals, Ku_vecs = sq_exp_evd_hilbert(swe.U_space, swe.k_init_u,
+                                          stat_params["u_cov"]["rho"],
+                                          stat_params["u_cov"]["ell"])
+    Kh_vals, Kh_vecs = sq_exp_evd_hilbert(swe.H_space, swe.k_init_h,
+                                          stat_params["h_cov"]["rho"],
+                                          stat_params["h_cov"]["ell"])
+
+    G_full[:] = 0.
+    G_full[np.ix_(swe.u_dofs, swe.u_dofs)] = (
+        Ku_vecs @ np.diag(Ku_vals) @ Ku_vecs.T)
+    G_full[np.ix_(swe.h_dofs, swe.h_dofs)] = (
+        Kh_vecs @ np.diag(Kh_vals) @ Kh_vecs.T)
+    G_full[:] = M_scipy @ G_full @ M_scipy.T
+
+    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, swe.k_init_u:], 0.)
+    np.testing.assert_allclose(swe.G_sqrt[swe.h_dofs, :swe.k_init_h], 0.)
+    np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
