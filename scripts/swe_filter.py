@@ -47,31 +47,31 @@ class ShallowOneFilter:
             self.G_sqrt = np.zeros((self.mean.shape[0],
                                     self.k_init_u + self.k_init_h))
 
-            if stat_params["u_cov"]["rho"] > 0.:
+            if stat_params["rho_u"] > 0.:
                 if stat_params["hilbert_gp"]:
                     Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
                         self.U_space, self.k_init_u,
-                        stat_params["u_cov"]["rho"],
-                        stat_params["u_cov"]["ell"])
+                        stat_params["rho_u"],
+                        stat_params["ell_u"])
                 else:
                     Ku_vals, Ku_vecs = sq_exp_evd(self.x_dofs_u,
-                                                  stat_params["u_cov"]["rho"],
-                                                  stat_params["u_cov"]["ell"],
+                                                  stat_params["rho_u"],
+                                                  stat_params["ell_u"],
                                                   k=self.k_init_u)
 
                 self.G_sqrt[self.u_dofs, 0:len(Ku_vals)] = (
                     Ku_vecs @ np.diag(np.sqrt(Ku_vals)))
 
-            if stat_params["h_cov"]["rho"] > 0.:
+            if stat_params["rho_h"] > 0.:
                 if stat_params["hilbert_gp"]:
                     Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
                         self.H_space, self.k_init_h,
-                        stat_params["h_cov"]["rho"],
-                        stat_params["h_cov"]["ell"])
+                        stat_params["rho_h"],
+                        stat_params["ell_h"])
                 else:
                     Kh_vals, Kh_vecs = sq_exp_evd(self.x_dofs_h,
-                                                  stat_params["h_cov"]["rho"],
-                                                  stat_params["h_cov"]["ell"],
+                                                  stat_params["rho_h"],
+                                                  stat_params["ell_h"],
                                                   k=self.k_init_h)
                 self.G_sqrt[self.h_dofs, self.k_init_u:(self.k_init_u + len(Kh_vals))] = (
                     Kh_vecs @ np.diag(np.sqrt(Kh_vals)))
@@ -80,11 +80,11 @@ class ShallowOneFilter:
             self.G_sqrt[:] = M_scipy @ self.G_sqrt
         else:
             K_u = sq_exp_covariance(self.x_dofs_u,
-                                    stat_params["u_cov"]["rho"],
-                                    stat_params["u_cov"]["ell"])
+                                    stat_params["rho_u"],
+                                    stat_params["ell_u"])
             K_h = sq_exp_covariance(self.x_dofs_h,
-                                    stat_params["h_cov"]["rho"],
-                                    stat_params["h_cov"]["ell"])
+                                    stat_params["rho_h"],
+                                    stat_params["ell_h"])
 
             self.G = np.zeros((self.mean.shape[0], self.mean.shape[0]))
             self.G[np.ix_(self.u_dofs, self.u_dofs)] = M_u_scipy @ K_u @ M_u_scipy.T
@@ -98,6 +98,27 @@ class ShallowOneFilter:
 
     def prediction_step(self, t):
         raise NotImplementedError
+
+    def compute_lml(self, y, H, sigma_y):
+        self.mean[:] = self.du.vector().get_local()
+        mean_obs = H @ self.mean
+        n_obs = len(mean_obs)
+
+        if self.lr:
+            HL = H @ self.cov_sqrt
+            cov_obs = HL @ HL.T
+        else:
+            HC = H @ self.cov
+            cov_obs = H @ self.cov @ H.T
+
+        cov_obs[np.diag_indices_from(cov_obs)] += sigma_y**2 + 1e-10
+        S_chol = cho_factor(cov_obs, lower=True)
+        S_inv_y = cho_solve(S_chol, y - mean_obs)
+        log_det = 2 * np.sum(np.log(np.diag(S_chol[0])))
+
+        return (- S_inv_y @ S_inv_y / 2
+                - log_det / 2
+                - n_obs * np.log(2 * np.pi) / 2)
 
     def update_step(self, y, H, sigma_y):
         self.mean[:] = self.du.vector().get_local()
@@ -161,7 +182,10 @@ class ShallowOneEx(ShallowOne, ShallowOneFilter):
             self.bcs[0] = fe.DirichletBC(self.W.sub(1), self.tidal_bc(t),
                                          self._left)
 
+        # solve for the mean
         fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
+        self.mean[:] = self.du.vector().get_local()
+
         self.assemble_derivatives()
         self.J_scipy_lu = splu(self.J_scipy.tocsc())
 
@@ -220,6 +244,7 @@ class ShallowOneKalman(ShallowOneLinear, ShallowOneFilter):
 
     def prediction_step(self, t):
         self.solver.solve()
+        self.mean[:] = self.du.vector().get_local()
 
         if self.lr:
             # push cov. forward

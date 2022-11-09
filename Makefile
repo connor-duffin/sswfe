@@ -31,27 +31,56 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 
 # 1d immersed bump
 # ----------------
+ks = 4 8 16 64 128
+nus = 0. 1e-6 1e-4 1e-2 1 100
 bump_output_dir = outputs/swe-bump
-nus = 1 1e-1 1e-2 1e-3 1e-4
-bump_linear = $(bump_output_dir)/1d-linear.h5
-bump_nonlinear = $(foreach nu,$(nus),$(bump_output_dir)/1d-nu-$(nu).h5)
-bump_1d_output_files = $(bump_linear) $(bump_nonlinear)
+n_threads = 8
 
-$(bump_output_dir)/1d-nu-%.h5: scripts/run_swe_1d_bump.py
+# generate data
+data/h_bump.nc:
+	python3 scripts/generate_data_swe_1d_bump.py --output_file $@
+
+# priors
+bump_priors_nonlinear:  # data/h_bump.nc
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--n_threads $(n_threads) --k $(ks) --nu $(nus) \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+bump_priors_linear:  # data/h_bump.nc
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--linear --n_threads $(n_threads) --k $(ks) --nu 0. \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+# posteriors
+bump_filters_nonlinear:  # data/h_bump.nc
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--n_threads $(n_threads) --k $(ks) --nu $(nus) --posterior \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+bump_filters_linear:  # data/h_bump.nc
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--linear --n_threads $(n_threads) --nu 0. --k $(ks) --posterior \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+# deterministic models
+$(bump_output_dir)/nu-%.h5: scripts/run_swe_1d_bump.py
 	python3 $< \
 		--nu $* --output_file $@ \
 		--nx 500 --dt 0.01 --nt_save 10
 
-$(bump_output_dir)/1d-linear.h5: scripts/run_swe_1d_bump.py
+$(bump_output_dir)/linear.h5: scripts/run_swe_1d_bump.py
 	python3 $< \
 		--output_file $@ --linear \
 		--nx 500 --dt 0.01 --nt_save 10
 
-all_bump_1d_outputs: $(bump_1d_output_files)
-	@echo $(bump_1d_output_files)
+all_bump_prior: bump_priors_nonlinear bump_priors_linear
 
-clean_all_bump_1d_outputs: $(bump_1d_output_files)
-	rm -f $(bump_1d_output_files)
+all_bump_post: bump_filters_nonlinear bump_filters_linear
+
+all_bump_prior_post: all_bump_prior all_bump_post
+
+clean_all_bump_outputs:
+	rm $(bump_output_dir)/*
 
 
 # meshes
