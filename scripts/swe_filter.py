@@ -201,8 +201,8 @@ class ShallowOneEx(ShallowOne, ShallowOneFilter):
             # TODO avoid reallocation
             D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
             D, V = D[::-1], V[:, ::-1]
-            logger.info("Prop. variance kept in the reduction: %f",
-                        np.sum(D[0:self.k]) / np.sum(D))
+            logger.debug("Prop. variance kept in the reduction: %f",
+                         np.sum(D[0:self.k]) / np.sum(D))
             np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
         else:
             self.cov_pred[:] = (self.J_prev_scipy @ self.cov_prev @ self.J_prev_scipy.T
@@ -256,8 +256,8 @@ class ShallowOneKalman(ShallowOneLinear, ShallowOneFilter):
             # TODO avoid reallocation
             D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
             D, V = D[::-1], V[:, ::-1]
-            logger.info("Prop. variance kept in the reduction: %f",
-                        np.sum(D[0:self.k]) / np.sum(D))
+            logger.debug("Prop. variance kept in the reduction: %f",
+                         np.sum(D[0:self.k]) / np.sum(D))
             np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
         else:
             self.cov_pred[:] = (

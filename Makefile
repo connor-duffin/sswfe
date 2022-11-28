@@ -32,34 +32,31 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 # 1d immersed bump
 # ----------------
 ks = 4 8 16 64 128
-nus = 0. 1e-6 1e-4 1e-2 1 100
+nus = 1e-6 1e-4 1e-2 1 100
+nt_skips = 1 5 10 25 100
 bump_output_dir = outputs/swe-bump
 n_threads = 8
 
-# generate data
-data/h_bump.nc:
-	python3 scripts/generate_data_swe_1d_bump.py --output_file $@
-
 # priors
-bump_priors_nonlinear:  # data/h_bump.nc
-	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --k $(ks) --nu $(nus) \
-		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
-
 bump_priors_linear:  # data/h_bump.nc
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--linear --n_threads $(n_threads) --k $(ks) --nu 0. \
+		--linear --n_threads $(n_threads) --nu 0. --nt_skip 1 --k 32 \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+bump_priors_nonlinear:  # data/h_bump.nc
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--n_threads $(n_threads) --nu $(nus) --nt_skip 1 --k 32 \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 # posteriors
 bump_filters_nonlinear:  # data/h_bump.nc
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --k $(ks) --nu $(nus) --posterior \
+		--n_threads $(n_threads) --nt_skip $(nt_skips) --k 32 --nu $(nus) --posterior \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 bump_filters_linear:  # data/h_bump.nc
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--linear --n_threads $(n_threads) --nu 0. --k $(ks) --posterior \
+		--linear --n_threads $(n_threads) --nu 0. --nt_skip $(nt_skips) --k 32 --posterior \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 # deterministic models
