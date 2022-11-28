@@ -41,7 +41,7 @@ def compute_errors(post, true, H_verts, relative=True):
         return v_norm_diff
 
 
-def run_model(data_file, nt_skip, k, nu, linear, output_dir, posterior=True):
+def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
     # TODO(connor): eventually (most of) these will be args
     stat_params = dict(rho_u=1e-4, ell_u=5.,
                        rho_h=1e-2, ell_h=5.,
@@ -54,18 +54,18 @@ def run_model(data_file, nt_skip, k, nu, linear, output_dir, posterior=True):
     if linear:
         swe = ShallowOneKalman(
             control=control,
-            params=dict(nu=0.),
+            params=dict(nu=0., bump_centre=c),
             stat_params=stat_params,
             lr=True)
     else:
         swe = ShallowOneEx(
             control=control,
-            params=dict(nu=nu),
+            params=dict(nu=nu, bump_centre=c),
             stat_params=stat_params,
             lr=True)
 
     # set the simulation runtimes
-    t_final = 300.
+    t_final = 100.
     nt = np.int32(t_final / control["dt"])
 
     # first read in the data
@@ -107,9 +107,11 @@ def run_model(data_file, nt_skip, k, nu, linear, output_dir, posterior=True):
     output_file_stem = "/{linearity}-{mtype}".format(
         linearity="linear" if linear else "nonlinear",
         mtype="posterior" if posterior else "prior"
-    ) + "-nt_skip-{nt_skip:d}-nu-{nu:.2e}-k-{k:d}.h5".format(nt_skip=nt_skip,
-                                                             nu=nu,
-                                                             k=k)
+    ) + "-c-{c:.1f}-nt_skip-{nt_skip:d}-nu-{nu:.2e}-k-{k:d}.h5".format(
+        c=c,
+        nt_skip=nt_skip,
+        nu=nu,
+        k=k)
     output_file = output_dir + output_file_stem
     output = h5py.File(output_file, "w")
     logger.info("saving output to %s", output)
@@ -118,6 +120,7 @@ def run_model(data_file, nt_skip, k, nu, linear, output_dir, posterior=True):
     for name, val in metadata.items():
         output.attrs.create(name, val)
 
+    output.attrs.create("c", c)
     output.attrs.create("nu", nu)
     output.attrs.create("linear", linear)
     output.attrs.create("posterior", posterior)
@@ -186,6 +189,7 @@ if __name__ == "__main__":
     parser.add_argument("--linear", action="store_true")
     parser.add_argument("--nt_skip", nargs="+", type=int)  # , default = 8
     parser.add_argument("--nu", nargs="+", type=float)  # , default = 1e-4
+    parser.add_argument("--c", nargs="+", type=float)  # , default = 10.
     parser.add_argument("--k", nargs="+", type=int)  # , default = 32
     parser.add_argument("--output_dir", type=str)
     args = parser.parse_args()
@@ -193,11 +197,11 @@ if __name__ == "__main__":
     p = Pool(args.n_threads)
     model_args = []
     if args.linear:
-        for a in product(args.nt_skip, args.k):
+        for a in product(args.nt_skip, args.k, args.c):
             model_args.append(
                 (args.data_file, *a, 0., args.linear, args.output_dir, args.posterior))
     else:
-        for a in product(args.nt_skip, args.k, args.nu):
+        for a in product(args.nt_skip, args.k, args.c, args.nu):
             model_args.append(
                 (args.data_file, *a, args.linear, args.output_dir, args.posterior))
 

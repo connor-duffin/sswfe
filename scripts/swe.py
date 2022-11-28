@@ -44,13 +44,17 @@ class PiecewiseIC(fe.UserExpression):
 
 
 class BumpTopo(fe.UserExpression):
-    def __init__(self, L):
+    def __init__(self, c, L):
         super().__init__()
+        self.c = c
         self.L = L
 
+        self.lower = c - 2
+        self.upper = c + 2
+
     def eval(self, values, x):
-        if x[0] <= 12. + fe.DOLFIN_EPS and x[0] >= 8. + fe.DOLFIN_EPS:
-            values[0] = 0.5 - (0.2 - 0.05 * (x[0] - 10.)**2)
+        if x[0] <= self.upper and x[0] >= self.lower:
+            values[0] = 0.5 * (0.6 + 0.1 * (x[0] - self.c)**2)
         else:
             values[0] = 0.5
 
@@ -72,6 +76,7 @@ class ShallowOneLinear:
         self.nx = control["nx"]
         self.dt = control["dt"]
         self.nu = params["nu"]
+        self.bump_centre = params["bump_centre"]
 
         # HACK: trying out setting default length for now
         self.L = 25.
@@ -108,8 +113,7 @@ class ShallowOneLinear:
 
         self.bcs = fe.DirichletBC(self.W.sub(1), fe.Constant(0.), bounds)
 
-        # HACK: include to construct IC/H
-        H = BumpTopo(self.L)
+        H = BumpTopo(self.bump_centre, self.L)
         self.H = fe.interpolate(H, self.H_space)
         u, h = fe.TrialFunctions(self.W)
         v_u, v_h = fe.TestFunctions(self.W)
@@ -124,7 +128,7 @@ class ShallowOneLinear:
         u_theta = self.theta * u + (1 - self.theta) * u_prev
         h_theta = self.theta * h + (1 - self.theta) * h_prev
 
-        # note inviscid flow
+        # (inviscid flow)
         self.F = (fe.inner(h - h_prev, v_h) / dt * fe.dx
                   + (self.H * u_theta).dx(0) * v_h * fe.dx
                   + fe.inner(u - u_prev, v_u) / dt * fe.dx
@@ -185,6 +189,7 @@ class ShallowOne:
         elif self.simulation == "tidal_flow":
             self.L = 14_000
         elif self.simulation == "immersed_bump":
+            self.bump_centre = params["bump_centre"]
             self.L = 25.
         else:
             raise ValueError("Simulation setup not recognised")
@@ -230,7 +235,7 @@ class ShallowOne:
             self.H = fe.interpolate(H, self.H_space)
         elif self.simulation == "immersed_bump":
             # set H
-            H = BumpTopo(self.L)
+            H = BumpTopo(self.bump_centre, self.L)
             self.H = fe.interpolate(H, self.H_space)
 
         self.du = fe.Function(self.W)

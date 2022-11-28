@@ -32,10 +32,11 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 # 1d immersed bump
 # ----------------
 ks = 4 8 16 64 128
+cs = 7 11 12 15 20
 nus = 1e-6 1e-4 1e-2 1 100
 nt_skips = 1 5 10 25 100
 bump_output_dir = outputs/swe-bump
-n_threads = 8
+n_threads = 4
 
 # priors
 bump_priors_linear:  # data/h_bump.nc
@@ -51,8 +52,13 @@ bump_priors_nonlinear:  # data/h_bump.nc
 # posteriors
 bump_filters_nonlinear:  # data/h_bump.nc
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --nt_skip $(nt_skips) --k 32 --nu $(nus) --posterior \
+		--n_threads $(n_threads) --nt_skip 20 --k 32 --nu $(nus) --c $(cs) --posterior \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+# bump_filters_nonlinear:  # data/h_bump.nc
+# 	python3 scripts/run_filter_swe_1d_bump.py \
+# 		--n_threads $(n_threads) --nt_skip $(nt_skips) --k 32 --nu $(nus) --posterior \
+# 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 bump_filters_linear:  # data/h_bump.nc
 	python3 scripts/run_filter_swe_1d_bump.py \
