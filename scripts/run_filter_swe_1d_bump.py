@@ -23,10 +23,14 @@ norm = np.linalg.norm
 control = dict(nx=500, dt=0.01, theta=0.6, simulation="immersed_bump")
 
 
-def compute_rmse(post, y_obs, H_obs):
-    """ Compute the error norm. Computed on a regular grid. """
+def compute_rmse(post, y_obs, H_obs, relative=False):
+    """ Compute the RMSE. """
     y_post = H_obs @ post.mean
-    return norm(y_post - y_obs) / len(y_obs)
+    error = norm(y_post - y_obs)
+    if relative:
+        return error / norm(y_obs)
+    else:
+        return error / len(y_obs)
 
 
 def compute_errors(post, true, H_verts, relative=True):
@@ -65,7 +69,7 @@ def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
             lr=True)
 
     # set the simulation runtimes
-    t_final = 100.
+    t_final = 200.
     nt = np.int32(t_final / control["dt"])
 
     # first read in the data
@@ -93,6 +97,7 @@ def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
     # data-based outputs
     t_obs = np.zeros((nt_obs, ))
     rmse_output = np.zeros((nt_obs, ))
+    rmse_rel_output = np.zeros((nt_obs, ))
     if posterior:
         lml_output = np.zeros((nt_obs, ))
 
@@ -145,7 +150,8 @@ def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
                     swe.update_step(y, H_obs, obs_system["sigma_y"])
 
                 # compute RMSE
-                rmse_output[i_save] = compute_rmse(swe, y, H_obs)
+                rmse_output[i_save] = compute_rmse(swe, y, H_obs, False)
+                rmse_rel_output[i_save] = compute_rmse(swe, y, H_obs, True)
                 t_obs[i_save] = t
                 i_save += 1
 
@@ -172,6 +178,7 @@ def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
     # outputs creation, etc
     output.create_dataset("t_obs", data=t_obs)
     output.create_dataset("rmse", data=rmse_output)
+    output.create_dataset("rmse_rel", data=rmse_rel_output)
 
     if posterior:
         output.create_dataset("lml", data=lml_output)

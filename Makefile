@@ -32,38 +32,46 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 # 1d immersed bump
 # ----------------
 ks = 4 8 16 64 128
-cs = 7 11 12 15 20
-nus = 1e-6 1e-4 1e-2 1 100
+cs = 5 7 10 11 12 15 20 22
+nus = 1e-6 1e-4 1e-2 1 1e2 1e4
 nt_skips = 1 5 10 25 100
+
+# constants
 bump_output_dir = outputs/swe-bump
-n_threads = 4
+n_threads = 12
+k_default = 32
+nt_skip_default = 50
 
-# priors
-bump_priors_linear:  # data/h_bump.nc
+# linear
+bump_priors_linear:
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--linear --n_threads $(n_threads) --nu 0. --nt_skip 1 --k 32 \
+		--linear --n_threads $(n_threads)  --nt_skip $(nt_skip_default) --k $(k_default) \
+		--nu 0. --c $(cs) \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
-bump_priors_nonlinear:  # data/h_bump.nc
+bump_filters_linear:
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --nu $(nus) --nt_skip 1 --k 32 \
+		--linear --n_threads $(n_threads) --nt_skip 50 --k 32 --posterior \
+		--nu 0. --c $(cs) \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
-# posteriors
-bump_filters_nonlinear:  # data/h_bump.nc
+# nonlinear
+bump_priors_nonlinear:
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --nt_skip 20 --k 32 --nu $(nus) --c $(cs) --posterior \
+		--n_threads $(n_threads) --nt_skip $(nt_skip_default) --k $(k_default) \
+		--nu $(nus) --c $(cs) \
+		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
+
+bump_filters_nonlinear:
+	python3 scripts/run_filter_swe_1d_bump.py \
+		--n_threads $(n_threads) --nt_skip 50 --k 32 --posterior \
+		--nu $(nus) --c $(cs)\
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 # bump_filters_nonlinear:  # data/h_bump.nc
 # 	python3 scripts/run_filter_swe_1d_bump.py \
 # 		--n_threads $(n_threads) --nt_skip $(nt_skips) --k 32 --nu $(nus) --posterior \
 # 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
-
-bump_filters_linear:  # data/h_bump.nc
-	python3 scripts/run_filter_swe_1d_bump.py \
-		--linear --n_threads $(n_threads) --nu 0. --nt_skip $(nt_skips) --k 32 --posterior \
-		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
 # deterministic models
 $(bump_output_dir)/nu-%.h5: scripts/run_swe_1d_bump.py
