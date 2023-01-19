@@ -1,16 +1,3 @@
-# syncing
-# -------
-rsb:
-		rsync -avzz \
-		cambox:/home/cpd32@ad.eng.cam.ac.uk/projects/20220609-swfe/figures/ \
-		/Users/connor/Projects/statfluids/20220609-swfe/figures/
-
-rsd:
-		rsync -avzz \
-		cambox:/home/cpd32@ad.eng.cam.ac.uk/projects/20220609-swfe/docs/ \
-		/Users/connor/Projects/statfluids/20220609-swfe/docs/
-
-
 # 1d tidal flow
 # -------------
 tidal_output_dir = outputs/swe-tidal
@@ -34,15 +21,14 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 ks = 4 8 16 64 128
 cs = 5 7 10 11 12 15 20 22
 nus = 1e-6 1e-4 1e-2 1 1e2 1e4
-nt_skips = 1 5 10 25 100
+nt_skips = 1 5 10 25 100 500
 
 # constants
 bump_output_dir = outputs/swe-bump
-n_threads = 12
+n_threads = 6 
 k_default = 32
 nt_skip_default = 50
 
-# linear
 bump_priors_linear:
 	python3 scripts/run_filter_swe_1d_bump.py \
 		--linear --n_threads $(n_threads)  --nt_skip $(nt_skip_default) --k $(k_default) \
@@ -51,11 +37,10 @@ bump_priors_linear:
 
 bump_filters_linear:
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--linear --n_threads $(n_threads) --nt_skip 50 --k 32 --posterior \
+		--linear --n_threads $(n_threads) --nt_skip $(nt_skips) --k $(k_default) --posterior \
 		--nu 0. --c $(cs) \
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
 
-# nonlinear
 bump_priors_nonlinear:
 	python3 scripts/run_filter_swe_1d_bump.py \
 		--n_threads $(n_threads) --nt_skip $(nt_skip_default) --k $(k_default) \
@@ -64,25 +49,9 @@ bump_priors_nonlinear:
 
 bump_filters_nonlinear:
 	python3 scripts/run_filter_swe_1d_bump.py \
-		--n_threads $(n_threads) --nt_skip 50 --k 32 --posterior \
+		--n_threads $(n_threads) --nt_skip $(nt_skips) --k $(k_default) --posterior \
 		--nu $(nus) --c $(cs)\
 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
-
-# bump_filters_nonlinear:  # data/h_bump.nc
-# 	python3 scripts/run_filter_swe_1d_bump.py \
-# 		--n_threads $(n_threads) --nt_skip $(nt_skips) --k 32 --nu $(nus) --posterior \
-# 		--data_file data/h_bump.nc --output_dir $(bump_output_dir)
-
-# deterministic models
-$(bump_output_dir)/nu-%.h5: scripts/run_swe_1d_bump.py
-	python3 $< \
-		--nu $* --output_file $@ \
-		--nx 500 --dt 0.01 --nt_save 10
-
-$(bump_output_dir)/linear.h5: scripts/run_swe_1d_bump.py
-	python3 $< \
-		--output_file $@ --linear \
-		--nx 500 --dt 0.01 --nt_save 10
 
 all_bump_prior: bump_priors_nonlinear bump_priors_linear
 
@@ -92,6 +61,17 @@ all_bump_prior_post: all_bump_prior all_bump_post
 
 clean_all_bump_outputs:
 	rm $(bump_output_dir)/*
+
+# (old!) deterministic models
+$(bump_output_dir)/nu-%.h5: scripts/run_swe_1d_bump.py
+	python3 $< \
+		--nu $* --output_file $@ \
+		--nx 500 --dt 0.01 --nt_save 10
+
+$(bump_output_dir)/linear.h5: scripts/run_swe_1d_bump.py
+	python3 $< \
+		--output_file $@ --linear \
+		--nx 500 --dt 0.01 --nt_save 10
 
 
 # meshes
