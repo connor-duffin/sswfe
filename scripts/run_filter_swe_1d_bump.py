@@ -47,13 +47,13 @@ def compute_errors(post, true, H_verts, relative=True):
 
 def run_model(data_file, nt_skip, k, c, nu, linear, output_dir, posterior=True):
     # TODO(connor): eventually (most of) these will be args
-    stat_params = dict(rho_u=1e-4, ell_u=5.,
-                       rho_h=1e-2, ell_h=5.,
+    stat_params = dict(rho_u=1e-2, ell_u=5.,
+                       rho_h=1., ell_h=5.,
                        k=k, k_init_u=k, k_init_h=k,
                        hilbert_gp=True)
 
     # keep (some of) these fixed for now
-    obs_system = dict(nt_skip=nt_skip, nx_skip=8, sigma_y=5e-4)
+    obs_system = dict(nt_skip=nt_skip, nx_skip=10, sigma_y=5e-4)
 
     if linear:
         swe = ShallowOneKalman(

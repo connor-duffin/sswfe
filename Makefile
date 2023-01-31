@@ -19,13 +19,12 @@ clean_all_tidal_1d_outputs: $(tidal_1d_output_files)
 # 1d immersed bump
 # ----------------
 ks = 4 8 16 64 128
-# cs = 5 7 10 11 12 15 20 22
 cs = 5 10 15 20
-nus = 1e-6 1e-4 1e-2 1 1e2 1e4
-nt_skips = 1 5 10 25 100 500
+nus = 1e-4 1e-3 1e-2 1e-1 1
+nt_skips = 1 10 25 100 500
 
 # constants
-bump_output_dir = outputs/swe-bump
+bump_output_dir = outputs/swe-bump-large-var
 n_threads = 6 
 k_default = 32
 nt_skip_default = 100
