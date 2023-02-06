@@ -260,6 +260,13 @@ class ShallowOne:
                   + g * h_theta.dx(0) * v_u * fe.dx
                   + fe.inner(h - h_prev, v_h) / dt * fe.dx
                   + ((self.H + h_theta) * u_theta).dx(0) * v_h * fe.dx)
+
+        # assemble RHS
+        self.rhs = (- u * u.dx(0) * v_u * fe.dx
+                    - 2 * nu * fe.inner(fe.grad(u), fe.grad(v_u)) * fe.dx
+                    - g * h.dx(0) * v_u * fe.dx
+                    - ((self.H + h) * u).dx(0) * v_h * fe.dx)
+        self.rhs_derivative = fe.derivative(self.rhs, self.du)
         self.J = fe.derivative(self.F, self.du)
 
         def _right(x, on_boundary):
@@ -311,13 +318,15 @@ class ShallowOne:
         u, h = fe.split(self.du)
         return fe.assemble(u**2 * fe.dx)
 
-    def solve(self, t):
+    def solve(self, t, set_prev=True):
         if self.simulation == "tidal_flow":
             self.bcs[0] = fe.DirichletBC(self.W.sub(1), self.tidal_bc(t),
                                          self._left)
 
         fe.solve(self.F == 0, self.du, bcs=self.bcs, J=self.J)
-        fe.assign(self.du_prev, self.du)
+
+        if set_prev:
+            fe.assign(self.du_prev, self.du)
 
     def set_curr_vector(self, du_vec):
         self.du.vector().set_local(du_vec)
