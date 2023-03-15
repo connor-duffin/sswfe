@@ -1,7 +1,7 @@
 import logging
 
 import fenics as fe
-from swe import ShallowTwo
+from swe_2d import ShallowTwo
 
 logging.basicConfig(level=logging.INFO)
 

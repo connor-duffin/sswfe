@@ -2,7 +2,7 @@ import h5py
 import logging
 
 from argparse import ArgumentParser
-from swe import ShallowTwo
+from swe_2d import ShallowTwo
 from tqdm import tqdm
 
 logging.basicConfig(format='%(asctime)s - %(relativeCreated)d ms - %(name)s - %(levelname)s - %(message)s',
@@ -27,13 +27,15 @@ swe = ShallowTwo(mesh=args.mesh_file,
                      "dt": 1e-3,
                      "theta": 1,
                      "simulation": simulation,
+                     "laplacian": True,
+                     "les": False,
                      "integrate_continuity_by_parts": args.integrate_continuity_by_parts
                  })
 
 if args.integrate_continuity_by_parts:
     logging.info("integrating continuity equation by parts")
 
-nt = 100_001
+nt = 10_001
 nt_thin = 100
 # HACK: because I am lazy at the moment
 nt_out = len([i for i in range(nt) if i % nt_thin == 0])

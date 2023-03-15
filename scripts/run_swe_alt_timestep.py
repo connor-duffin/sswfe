@@ -3,7 +3,7 @@ import logging
 from argparse import ArgumentParser
 import numpy as np
 import fenics as fe
-from swe import ShallowTwo
+from swe_2d import ShallowTwo
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,20 +23,21 @@ def format_output_file(output_dir, BDF2=False, theta=1., nu_t=0.):
 
 
 def run_swe_cylinder(output_file, BDF2=False, theta=1., nu_t=0.):
+    control = dict(dt=1e-3,
+                   theta=theta,
+                   simulation="cylinder",
+                   integrate_continuity_by_parts=False,
+                   laplacian=True,
+                   les=False)
     swe = ShallowTwo(mesh="mesh/channel-piggott.xdmf",
-                     control={
-                         "dt": 1e-3,
-                         "theta": theta,
-                         "simulation": "cylinder",
-                         "integrate_continuity_by_parts": False,
-                         "laplacian": True,
-                         "les": False
-                     })
+                     control=control)
     swe.nu += nu_t  # constant eddy viscosity
-    nt = 5001  # run up to time t = 5 s  (failure occurs at ~1.2)
-    nt_thin = 1  # store every iteration
+    t_final = 120.
+    nt = int(t_final / control["dt"])
+    nt_thin = 1000  # store every iteration
     t = 0.
 
+    logging.info("running for %d timesteps", nt)
     logging.info("storing solution at %s", output_file)
     swe.setup_checkpoint(output_file)
     attrs = swe.checkpoint.attributes("/")
@@ -85,29 +86,29 @@ def run_swe_cylinder(output_file, BDF2=False, theta=1., nu_t=0.):
     swe.checkpoint.close()
 
 
-# logging.info("Running default LES simulation")
-# run_swe_cylinder(output_file="outputs/swe-channel-les-theta-0.60.h5",
-#                  BDF2=False, theta=0.6, nu_t=0.)
+logging.info("Running default LES simulation")
+run_swe_cylinder(output_file="outputs/swe-channel-theta-0.60.h5",
+                 BDF2=False, theta=0.6, nu_t=1e-4)
 
 # parameters
 # schemes = [{"BDF2": True, "theta": 1.0}]
 # nus = [8e-5, 9e-5, 1e-4]
 # BDF2 = [True, False]
 
-schemes = []
-thetas = [0.5, 0.6, 1.]
-for theta in thetas:
-    schemes.append({"BDF2": False, "theta": theta})
+# schemes = []
+# thetas = [0.5, 0.6, 1.]
+# for theta in thetas:
+#     schemes.append({"BDF2": False, "theta": theta})
 
-kwargs_all = []
-nus = np.linspace(0, 1e-4, 11).tolist()
-for scheme in schemes:
-    for nu in nus:
-        kwargs = {**scheme, "nu_t": nu}
-        kwargs_all.append({
-            "output_file": format_output_file("outputs/", **kwargs),
-            **kwargs})
+# kwargs_all = []
+# nus = np.linspace(0, 1e-4, 11).tolist()
+# for scheme in schemes:
+#     for nu in nus:
+#         kwargs = {**scheme, "nu_t": nu}
+#         kwargs_all.append({
+#             "output_file": format_output_file("outputs/", **kwargs),
+#             **kwargs})
 
-for kwargs in kwargs_all:
-    print(kwargs)
-    run_swe_cylinder(**kwargs)
+# for kwargs in kwargs_all:
+#     print(kwargs)
+#     run_swe_cylinder(**kwargs)
