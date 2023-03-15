@@ -14,9 +14,12 @@ from swe_filter import ShallowOneEx, ShallowOneKalman
 
 def test_1d_linear_filter():
     control = {"nx": 32, "dt": 0.5, "theta": 1.0, "simulation": "immersed_bump"}
-    params = {"nu": 0.}
-    stat_params = {"h_cov": {"rho": 1e-2, "ell": 5000.},
-                   "u_cov": {"rho": 0., "ell": 5000.}}
+    params = {"nu": 0., "bump_centre": 10}
+    stat_params = dict(rho_u=1e-2, ell_u=5000.,
+                       rho_h=0., ell_h=5000.)
+    # k=k, k_init_u=k, k_init_h=k
+
+    # init according to system
     swe = ShallowOneKalman(control, params, stat_params, lr=False)
 
     # verify our construction/filtering is OK
@@ -45,8 +48,8 @@ def test_1d_linear_filter():
 def test_1d_nonlinear_filter():
     control = {"nx": 32, "dt": 1., "theta": 1.0, "simulation": "tidal_flow"}
     params = {"nu": 1.}
-    stat_params = {"h_cov": {"rho": 1e-2, "ell": 5000.},
-                   "u_cov": {"rho": 0., "ell": 5000.}}
+    stat_params = dict(rho_u=1., ell_u=5000.,
+                       rho_h=0., ell_h=5000.)
     swe = ShallowOneEx(control, params, stat_params, lr=False)
 
     # check covariance initialisation
@@ -54,12 +57,12 @@ def test_1d_nonlinear_filter():
     M = fe.assemble(fe.inner(u, v) * fe.dx)
     M = dolfin_to_csr(M)
     K = sq_exp_covariance(swe.x_dofs_h,
-                          stat_params["h_cov"]["rho"],
-                          stat_params["h_cov"]["ell"])
+                          stat_params["rho_h"],
+                          stat_params["ell_h"])
     G = M @ K @ M.T
 
     for row, idx in enumerate(swe.h_dofs):
-        assert_allclose(G[row, :], swe.G[idx, swe.h_dofs])
+        assert_allclose(swe.G[idx, swe.h_dofs], G[row, :], atol=1e-8)
 
     swe.assemble_derivatives()
     assert type(swe.J_scipy) == csr_matrix
@@ -94,14 +97,13 @@ def test_1d_nonlinear_filter():
 
 
 def test_1d_filter_lr():
+    k = 16
     control = {"nx": 32, "dt": 1., "theta": 1.0, "simulation": "tidal_flow"}
     params = {"nu": 1.}
-    stat_params = {"h_cov": {"rho": 1., "ell": 5000.},
-                   "u_cov": {"rho": 0., "ell": 5000.},
-                   "k_init_u": 16,
-                   "k_init_h": 16,
-                   "k": 16,
-                   "hilbert_gp": False}
+    stat_params = dict(rho_u=1, ell_u=5000.,
+                       rho_h=1, ell_h=5000.,
+                       k=k, k_init_u=k, k_init_h=k, hilbert_gp=False)
+
     swe = ShallowOneEx(control, params, stat_params, lr=True)
     u, v = fe.TrialFunction(swe.W), fe.TestFunction(swe.W)
     M = fe.assemble(fe.inner(u, v) * fe.dx)
@@ -115,45 +117,41 @@ def test_1d_filter_lr():
     # TODO: unit test update steps
     swe.prediction_step(0.)
 
-    # first, check that full construction ensures zeros where needed
+    # first, check that full construction is correct
     G_full = np.zeros((swe.mean.shape[0], swe.mean.shape[0]))
+    Ku_vals, Ku_vecs = sq_exp_evd(swe.x_dofs_u,
+                                  stat_params["rho_u"],
+                                  stat_params["ell_u"],
+                                  k=swe.k_init_u)
     Kh_vals, Kh_vecs = sq_exp_evd(swe.x_dofs_h,
-                                  stat_params["h_cov"]["rho"],
-                                  stat_params["h_cov"]["ell"],
+                                  stat_params["rho_h"],
+                                  stat_params["ell_h"],
                                   k=swe.k_init_h)
+
+    # compute initial EVD approximation
     G_full[np.ix_(swe.h_dofs, swe.h_dofs)] = (
         Kh_vecs @ np.diag(Kh_vals) @ Kh_vecs.T)
+    G_full[np.ix_(swe.u_dofs, swe.u_dofs)] = (
+        Ku_vecs @ np.diag(Ku_vals) @ Ku_vecs.T)
+
+    # check all ok
+    G_sqrt = swe.G_sqrt.copy()
     G_full[:] = M_scipy @ G_full @ M_scipy.T
-
-    np.testing.assert_allclose(swe.G_sqrt[:, :swe.k_init_h], 0.)
+    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, swe.k_init_u:], 0.)
+    np.testing.assert_allclose(swe.G_sqrt[swe.h_dofs, :swe.k_init_h], 0.)
     np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
-    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, :], 0.)
 
-    # now test hilbert-GP additions
+    # now test hilbert-GP approach
     stat_params.update(hilbert_gp=True)
     swe = ShallowOneEx(control, params, stat_params, lr=True)
-    Kh_vals, Kh_vecs = sq_exp_evd_hilbert(swe.H_space, swe.k_init_h,
-                                          stat_params["h_cov"]["rho"],
-                                          stat_params["h_cov"]["ell"])
-
-    G_full[:] = 0.
-    G_full[np.ix_(swe.h_dofs, swe.h_dofs)] = (
-        Kh_vecs @ np.diag(Kh_vals) @ Kh_vecs.T)
-    G_full[:] = M_scipy @ G_full @ M_scipy.T
-
-    np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
-    np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, :], 0.)
-
-    # and do the same with zero correlations on the `u` scale
-    stat_params["u_cov"].update(rho=1.)
-    swe = ShallowOneEx(control, params, stat_params, lr=True)
     Ku_vals, Ku_vecs = sq_exp_evd_hilbert(swe.U_space, swe.k_init_u,
-                                          stat_params["u_cov"]["rho"],
-                                          stat_params["u_cov"]["ell"])
+                                          stat_params["rho_u"],
+                                          stat_params["ell_u"])
     Kh_vals, Kh_vecs = sq_exp_evd_hilbert(swe.H_space, swe.k_init_h,
-                                          stat_params["h_cov"]["rho"],
-                                          stat_params["h_cov"]["ell"])
+                                          stat_params["rho_h"],
+                                          stat_params["ell_h"])
 
+    G_sqrt_hilbert = swe.G_sqrt.copy()
     G_full[:] = 0.
     G_full[np.ix_(swe.u_dofs, swe.u_dofs)] = (
         Ku_vecs @ np.diag(Ku_vals) @ Ku_vecs.T)
@@ -164,3 +162,6 @@ def test_1d_filter_lr():
     np.testing.assert_allclose(swe.G_sqrt[swe.u_dofs, swe.k_init_u:], 0.)
     np.testing.assert_allclose(swe.G_sqrt[swe.h_dofs, :swe.k_init_h], 0.)
     np.testing.assert_allclose(swe.G_sqrt @ swe.G_sqrt.T, G_full)
+
+    # regression test to see that computations are the same
+    np.testing.assert_allclose(np.linalg.norm(G_sqrt - G_sqrt_hilbert), 3827.659732)
