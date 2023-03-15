@@ -23,7 +23,8 @@ swe_dgp = ShallowOne(
                  dt=settings["dt"],
                  theta=settings["theta"],
                  simulation="immersed_bump"),
-    params=dict(nu=settings["nu"]))
+    params=dict(nu=settings["nu"],
+                bump_centre=10.))
 
 # set the observation system
 nt = np.int64(t_final / settings["dt"])
