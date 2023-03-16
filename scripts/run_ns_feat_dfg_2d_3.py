@@ -3,9 +3,8 @@ import logging
 from argparse import ArgumentParser
 import numpy as np
 import fenics as fe
-from ns_2d import NSTwo
 
-logging.basicConfig(level=logging.INFO)
+from ns_2d import NSTwo
 
 comm = fe.MPI.comm_world
 rank = comm.rank
@@ -13,7 +12,7 @@ rank = comm.rank
 
 def run_ns_feat(output_file, theta=1.):
     mesh = "mesh/featflow-2d-3-benchmark.xdmf"
-    ns = NSTwo(mesh, dict(dt=1/1600, theta=0.5))
+    ns = NSTwo(mesh, dict(dt=1/1600, theta=theta))
 
     F, J = ns.setup_form(ns.du, ns.du_prev)
     bcs, F = ns.setup_bcs(F)
@@ -31,19 +30,19 @@ def run_ns_feat(output_file, theta=1.):
     attrs = ns.checkpoint.attributes("/")
     attrs["scheme"] = "theta"
     attrs["theta"] = theta
+    attrs["nt"] = nt
 
     for i in range(nt):
-        if rank == 0:
-            logging.info(
-                "storing solution at time %.5f" +
-                " iteration %d of %d complete", t, i + 1, nt)
         ns.checkpoint_save(t)
+        if i % 1000 == 0:
+            logging.info(f"Solver finished time {t:.5f}")
         try:
             t += ns.dt
             ns.u_in.t = t
             solver.solve()
+            ns.assign_prev()
         except RuntimeError:
-            print(f"Solver failed at time {t:.5f}")
+            logging.info(f"Solver failed at time {t:.5f}")
             break
 
     ns.checkpoint.close()

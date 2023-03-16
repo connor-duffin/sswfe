@@ -166,7 +166,8 @@ class NSTwo:
     def setup_checkpoint(self, checkpoint_file):
         """ Set up the checkpoint file, writing the appropriate things etc. """
         logger.info(f"storing outputs in {checkpoint_file}")
-        self.checkpoint = fe.HDF5File(self.mesh.mpi_comm(), checkpoint_file, "w")
+        self.checkpoint = fe.HDF5File(
+            self.mesh.mpi_comm(), checkpoint_file, "w")
 
     def checkpoint_save(self, t):
         """ Save the simulation at the current time. """
