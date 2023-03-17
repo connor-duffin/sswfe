@@ -16,6 +16,9 @@ class NSTwo:
     def __init__(self, mesh, control):
         self.dt = control["dt"]
         self.theta = control["theta"]
+        self.setup = control["setup"]
+        logger.info("Using %s config", self.setup)
+        assert self.setup in ("branson", "feat")
 
         if type(mesh) == str:
             # read mesh from file
@@ -52,45 +55,67 @@ class NSTwo:
         # storage for later
         self.du_vertices = np.copy(self.du.compute_vertex_values())
 
-        # set viscosity
-        self.nu = 1e-3
-
         # initialise solution objects
         self.F = None
         self.J = None
         self.bcs = None
 
     def setup_form(self, du, du_prev, du_prev_prev=None):
+        if self.setup == "branson":
+            self.nu = 1e-6
+            self.rho = 1000.
+        elif self.setup == "feat":
+            self.nu = 1e-3
+            self.rho = 1.
+
         nu = fe.Constant(self.nu)
+        rho = fe.Constant(self.rho)
         dt = fe.Constant(self.dt)
 
         # define fcns
         u, p = fe.split(du)
         u_prev, p_prev = fe.split(du_prev)
-        v_u, v_p = fe.TestFunctions(self.W)
+        v, q = fe.TestFunctions(self.W)
 
         # use theta-method for timesteps
         u_mid = self.theta * u + (1 - self.theta) * u_prev
         p_mid = self.theta * p + (1 - self.theta) * p_prev
-        F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
-             + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
-             + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
-             - fe.inner(p_mid, fe.div(v_u)) * fe.dx  # pressure gradient
-             + fe.inner(fe.div(u_mid), v_p) * fe.dx)  # velocity field
+        F = (fe.inner(u - u_prev, v) / dt * fe.dx  # mass term u
+             + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v) * fe.dx  # advection
+             + nu * fe.inner(fe.grad(u_mid), fe.grad(v)) * fe.dx  # dissipation
+             - (1 / rho) * fe.inner(p_mid, fe.div(v)) * fe.dx   # pressure gradient
+             + fe.inner(fe.div(u_mid), q) * fe.dx)  # velocity field
 
         J = fe.derivative(F, du)
         return F, J
 
     def setup_bcs(self, F):
-        self.u_in = fe.Expression(
-            ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
-            pi=np.pi, t=0, degree=4)
+        # zero velocity on bounds
         no_slip = fe.Constant((0., 0.))
 
-        inflow = "near(x[0], 0)"
-        walls = "near(x[1], 0) || near(x[1], 0.41)"
-        cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
-                    + "x[1] >= 0.15 && x[1] <= 0.25")
+        # inflow velocity is horizontal
+        if self.setup == "branson":
+            self.u_in = fe.Constant((0.01, 0.))
+
+            # inflow = "near(x[0], 0)"
+            # walls = "near(x[1], 0) || near(x[1], 1.85)"
+            # cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 && "
+            #             + "x[1] >= 0.875 && x[1] <= 0.975")
+
+            # try FEAT mesh for this flow
+            inflow = "near(x[0], 0)"
+            walls = "near(x[1], 0) || near(x[1], 0.41)"
+            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
+                        + "x[1] >= 0.15 && x[1] <= 0.25")
+        elif self.setup == "feat":
+            self.u_in = fe.Expression(
+                ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
+                pi=np.pi, t=0, degree=4)
+
+            inflow = "near(x[0], 0)"
+            walls = "near(x[1], 0) || near(x[1], 0.41)"
+            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
+                        + "x[1] >= 0.15 && x[1] <= 0.25")
 
         bcu_inflow = fe.DirichletBC(self.W.sub(0), self.u_in, inflow)
         bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
@@ -135,7 +160,7 @@ class NSTwo:
         prm["snes_solver"]['krylov_solver']['monitor_convergence'] = False
 
         # don't print outputs from the Newton solver
-        prm["snes_solver"]["report"] = False
+        prm["snes_solver"]["report"] = True
         return solver
 
     def assign_prev(self):
