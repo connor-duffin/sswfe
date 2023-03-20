@@ -13,12 +13,12 @@ cm = 1e-2
 # domain_width = 0.41
 # domain_length = 2.2
 domain_width = 1.85
-domain_length = 3.7
+domain_length = 5.2
 
 # cylinder setup
 cyl_diameter = 0.1
 cyl_radius = cyl_diameter / 2
-cyl_center = [1., 0.925]
+cyl_center = [domain_length / 2, domain_width / 2]
 
 gmsh.initialize()
 gmsh.model.add("channel")

@@ -104,9 +104,9 @@ class NSTwo:
 
             # try FEAT mesh for this flow
             inflow = "near(x[0], 0)"
-            walls = "near(x[1], 0) || near(x[1], 0.41)"
-            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
-                        + "x[1] >= 0.15 && x[1] <= 0.25")
+            walls = "near(x[1], 0) || near(x[1], 1.85)"
+            cylinder = ("on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && "
+                        + "x[1] >= 0.875 && x[1] <= 0.975")
         elif self.setup == "feat":
             self.u_in = fe.Expression(
                 ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
@@ -200,3 +200,100 @@ class NSTwo:
 
     def checkpoint_close(self):
         self.checkpoint.close()
+
+
+class NSTwoSplit:
+    def __init__(self, mesh, control):
+        self.dt = control["dt"]
+        self.setup = control["setup"]
+        logger.info("Using %s config", self.setup)
+        assert self.setup in ("branson", "feat")
+
+        if type(mesh) == str:
+            # read mesh from file
+            logger.info("reading mesh from file")
+            self.mesh = fe.Mesh()
+            f = fe.XDMFFile(mesh)
+            f.read(self.mesh)
+        else:
+            logger.info("setting mesh from object")
+            self.mesh = mesh
+
+        logger.info(f"mesh has {self.mesh.num_cells()} elements")
+        self.dx = self.mesh.hmax()
+        self.x = fe.SpatialCoordinate(self.mesh)
+        self.x_coords = self.mesh.coordinates()
+        self.boundaries = fe.MeshFunction("size_t", self.mesh,
+                                          self.mesh.topology().dim() - 1, 0)
+
+        # use P2-P1 elements only
+        U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
+        P = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
+        self.U_space = fe.FunctionSpace(self.mesh, U)
+        self.P_space = fe.FunctionSpace(self.mesh, P)
+
+    def setup_form(self):
+        # zero velocity on bounds
+        self.u_in = fe.Constant((0.01, 0.))
+        no_slip = fe.Constant((0., 0.))
+
+        if self.setup == "branson":
+            self.nu = 1e-6
+            self.rho = 1000.
+            self.u_in = fe.Constant((0.01, 0.))
+
+            inflow = "near(x[0], 0)"
+            walls = "near(x[1], 0) || near(x[1], 1.85)"
+            cylinder = ("on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && "
+                        + "x[1] >= 0.875 && x[1] <= 0.975")
+        elif self.setup == "feat":
+            self.nu = 1e-3
+            self.rho = 1.
+            self.u_in = fe.Expression(
+                ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
+                pi=np.pi, t=0, degree=4)
+
+            inflow = "near(x[0], 0)"
+            walls = "near(x[1], 0) || near(x[1], 0.41)"
+            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
+                        + "x[1] >= 0.15 && x[1] <= 0.25")
+
+        bcu_inflow = fe.DirichletBC(self.U_space, self.u_in, inflow)
+        bcu_walls = fe.DirichletBC(self.U_space, no_slip, walls)
+        bcu_cyl = fe.DirichletBC(self.U_space, no_slip, cylinder)
+        bcu = [bcu_inflow, bcu_walls, bcu_cyl]
+
+        nu = fe.Constant(self.nu)
+        rho = fe.Constant(self.rho)
+        dt = fe.Constant(self.dt)
+
+        u = fe.TrialFunction(self.U_space)
+        v = fe.TestFunction(self.U_space)
+        p = fe.TrialFunction(self.P_space)
+        q = fe.TestFunction(self.P_space)
+
+        self.u_star = fe.Function(self.U_space)
+        self.u_prev = fe.Function(self.U_space)
+        self.p_prev = fe.Function(self.P_space)
+        self.phi = fe.Function(self.P_space)
+
+        # step one: solve for u_star
+        u_mid = (u + self.u_prev) / 2
+        F1 = (fe.inner(u - self.u_prev, v) / dt * fe.dx
+              + fe.inner(fe.dot(self.u_prev, fe.nabla_grad(self.u_prev)), v) * fe.dx  # advection
+              + nu * fe.inner(fe.grad(u_mid), fe.grad(v)) * fe.dx  # dissipation
+              - (1 / rho) * fe.inner(self.p_prev, fe.div(v)) * fe.dx)   # pressure gradient
+        self.a1, self.l1 = fe.lhs(F1), fe.rhs(F1)
+        self.A1 = fe.assemble(self.a1)
+
+        # step two: solve for pressure
+        F2 = (fe.inner(fe.grad(p), fe.grad(q)) * fe.dx
+              - rho / dt * fe.inner(fe.div(self.u_star), q) * fe.dx)
+        self.a2, self.l2 = fe.lhs(F2), fe.rhs(F2)
+        self.A2 = fe.assemble(self.a2)
+
+        # step three: solve for pressure-corrected velocity
+        F3 = (fe.inner(u - self.u_star, v) * fe.dx
+              + rho * dt * fe.inner(fe.grad(self.phi), v) * fe.dx)
+        self.a3, self.l3 = fe.lhs(F3), fe.rhs(F3)
+        self.A3 = fe.assemble(self.a3)
