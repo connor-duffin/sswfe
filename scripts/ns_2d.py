@@ -51,120 +51,104 @@ class NSTwo:
         # initialise the fcns
         self.du = fe.Function(W)
         self.du_prev = fe.Function(W)
+        self.du_prev_prev = fe.Function(W)
 
         # storage for later
         self.du_vertices = np.copy(self.du.compute_vertex_values())
 
-        # initialise solution objects
-        self.F = None
-        self.J = None
-        self.bcs = None
-
-    def setup_form(self, du, du_prev, du_prev_prev=None):
+    def setup_form(self):
         if self.setup == "branson":
             self.nu = 1e-6
             self.rho = 1000.
+
+            self.u_in = fe.Constant((0.01, 0.))
+
+            inflow = "near(x[0], 0)"
+            walls = "near(x[1], 0) || near(x[1], 1.85)"
+            cylinder = ("on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && "
+                        + "x[1] >= 0.875 && x[1] <= 0.975")
         elif self.setup == "feat":
             self.nu = 1e-3
             self.rho = 1.
+
+            self.u_in = fe.Expression(
+                ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
+                pi=np.pi, t=0, degree=4)
+
+            inflow = "near(x[0], 0)"
+            outflow = "near(x[0], 2.2)"
+            walls = "near(x[1], 0) || near(x[1], 0.41)"
+            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
+                        + "x[1] >= 0.15 && x[1] <= 0.25")
+
+        # zero velocity on bounds
+        no_slip = fe.Constant((0., 0.))
+        bcu_inflow = fe.DirichletBC(self.W.sub(0), self.u_in, inflow)
+        bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
+        bcu_cyl = fe.DirichletBC(self.W.sub(0), no_slip, cylinder)
+
+        self.bcu = [bcu_inflow, bcu_walls, bcu_cyl]
 
         nu = fe.Constant(self.nu)
         rho = fe.Constant(self.rho)
         dt = fe.Constant(self.dt)
 
         # define fcns
-        u, p = fe.split(du)
-        u_prev, p_prev = fe.split(du_prev)
+        u, p = fe.TrialFunctions(self.W)
         v, q = fe.TestFunctions(self.W)
 
-        # use theta-method for timesteps
+        u_prev, p_prev = fe.split(self.du_prev)
+        u_prev_prev, _ = fe.split(self.du_prev_prev)
+
+        # use Simo-Armero scheme: https://doi.org/10.1016/0045-7825(94)90042-6
         u_mid = self.theta * u + (1 - self.theta) * u_prev
         p_mid = self.theta * p + (1 - self.theta) * p_prev
         F = (fe.inner(u - u_prev, v) / dt * fe.dx  # mass term u
-             + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v) * fe.dx  # advection
+             + fe.inner(fe.dot(1.5 * u_prev - 0.5 * u_prev_prev,
+                               fe.nabla_grad(u_mid)), v) * fe.dx  # advection
              + nu * fe.inner(fe.grad(u_mid), fe.grad(v)) * fe.dx  # dissipation
-             - (1 / rho) * fe.inner(p_mid, fe.div(v)) * fe.dx   # pressure gradient
+             - (1 / rho) * fe.inner(p_mid, fe.div(v)) * fe.dx   # pressure
              + fe.inner(fe.div(u_mid), q) * fe.dx)  # velocity field
 
-        J = fe.derivative(F, du)
-        return F, J
+        self.a, self.L = fe.lhs(F), fe.rhs(F)
+        self.A = fe.assemble(self.a)
 
-    def setup_bcs(self, F):
-        # zero velocity on bounds
-        no_slip = fe.Constant((0., 0.))
+        for bc in self.bcu:
+            bc.apply(self.A)
 
-        # inflow velocity is horizontal
-        if self.setup == "branson":
-            self.u_in = fe.Constant((0.01, 0.))
+        # solver setup
+        fe.PETScOptions.set("ksp_view")
+        fe.PETScOptions.set("ksp_monitor_true_residual")
+        fe.PETScOptions.set("pc_type", "fieldsplit")
+        fe.PETScOptions.set("pc_fieldsplit_type", "additive")
+        fe.PETScOptions.set("pc_fieldsplit_detect_saddle_point")
+        fe.PETScOptions.set("fieldsplit_0_ksp_type", "preonly")
+        fe.PETScOptions.set("fieldsplit_0_pc_type", "sor")
+        fe.PETScOptions.set("fieldsplit_1_ksp_type", "preonly")
+        fe.PETScOptions.set("fieldsplit_1_pc_type", "hypre")
 
-            # inflow = "near(x[0], 0)"
-            # walls = "near(x[1], 0) || near(x[1], 1.85)"
-            # cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 && "
-            #             + "x[1] >= 0.875 && x[1] <= 0.975")
+        self.solver = fe.PETScKrylovSolver("gmres")
+        self.solver.set_operator(self.A)
+        self.solver.set_from_options()
 
-            # try FEAT mesh for this flow
-            inflow = "near(x[0], 0)"
-            walls = "near(x[1], 0) || near(x[1], 1.85)"
-            cylinder = ("on_boundary && x[0] >= 2.55 && x[0] <= 2.65 && "
-                        + "x[1] >= 0.875 && x[1] <= 0.975")
-        elif self.setup == "feat":
-            self.u_in = fe.Expression(
-                ("(4 * 1.5 * sin(pi * t / 8) * x[1] * (0.41 - x[1])) / (0.41 * 0.41)", "0."),
-                pi=np.pi, t=0, degree=4)
+        # self.solver.parameters["absolute_tolerance"] = 1e-8
+        self.solver.parameters["relative_tolerance"] = 1e-7
+        self.solver.parameters["maximum_iterations"] = 500
+        self.solver.parameters["report"] = False
 
-            inflow = "near(x[0], 0)"
-            walls = "near(x[1], 0) || near(x[1], 0.41)"
-            cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
-                        + "x[1] >= 0.15 && x[1] <= 0.25")
+    def solve(self, t):
+        if self.setup == "feat":
+            self.u_in.t = t
 
-        bcu_inflow = fe.DirichletBC(self.W.sub(0), self.u_in, inflow)
-        bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
-        bcu_cyl = fe.DirichletBC(self.W.sub(0), no_slip, cylinder)
-        bcs = [bcu_inflow, bcu_walls, bcu_cyl]
+        # solve variational problem
+        b = fe.assemble(self.L)
+        for bc in self.bcu:
+            bc.apply(b)
 
-        return bcs, F
+        self.solver.solve(self.du.vector(), b)
 
-    def setup_solver(self, F, du, bcs, J):
-        problem = fe.NonlinearVariationalProblem(F, du, bcs=bcs, J=J)
-        solver = fe.NonlinearVariationalSolver(problem)
-
-        # vanilla fenics solver options
-        prm = solver.parameters
-        # prm['newton_solver']['absolute_tolerance'] = 1E-8
-        # prm['newton_solver']['relative_tolerance'] = 1E-6
-        # prm['newton_solver']['convergence_criterion'] = "incremental"
-        # prm['newton_solver']['maximum_iterations'] = 50
-        # prm['newton_solver']['relaxation_parameter'] = 0.5
-
-        # PETSc SNES config
-        prm["nonlinear_solver"] = "snes"
-
-        # MUMPs => direct linear solver, uncomment for direct solve:
-        prm["snes_solver"]["linear_solver"] = "mumps"
-
-        # otherwise uncomment for Krylov solve:
-        # prm["snes_solver"]["line_search"] = "bt"
-        # prm["snes_solver"]["linear_solver"] = "gmres"
-        # prm["snes_solver"]["preconditioner"] = "jacobi"
-        # logger.info(f"using {prm['snes_solver']['linear_solver']} solver with {prm['snes_solver']['preconditioner']} PC")
-
-        # solver convergence
-        prm["snes_solver"]["relative_tolerance"] = 1e-5
-        prm["snes_solver"]['absolute_tolerance'] = 1e-5
-        prm["snes_solver"]["maximum_iterations"] = 50
-        prm["snes_solver"]['error_on_nonconvergence'] = True
-        prm["snes_solver"]['krylov_solver']['nonzero_initial_guess'] = True
-
-        # solver reporting
-        prm["snes_solver"]['krylov_solver']['report'] = False
-        prm["snes_solver"]['krylov_solver']['monitor_convergence'] = False
-
-        # don't print outputs from the Newton solver
-        prm["snes_solver"]["report"] = True
-        return solver
-
-    def assign_prev(self):
         # set previous timestep
+        fe.assign(self.du_prev_prev, self.du_prev)
         fe.assign(self.du_prev, self.du)
 
     @staticmethod
@@ -233,10 +217,6 @@ class NSTwoSplit:
         self.P_space = fe.FunctionSpace(self.mesh, P)
 
     def setup_form(self):
-        # zero velocity on bounds
-        self.u_in = fe.Constant((0.01, 0.))
-        no_slip = fe.Constant((0., 0.))
-
         if self.setup == "branson":
             self.nu = 1e-6
             self.rho = 1000.
@@ -254,14 +234,20 @@ class NSTwoSplit:
                 pi=np.pi, t=0, degree=4)
 
             inflow = "near(x[0], 0)"
+            outflow = "near(x[0], 2.2)"
             walls = "near(x[1], 0) || near(x[1], 0.41)"
             cylinder = ("on_boundary && x[0] >= 0.15 && x[0] <= 0.25 && "
                         + "x[1] >= 0.15 && x[1] <= 0.25")
 
+        # zero velocity on bounds
+        no_slip = fe.Constant((0., 0.))
         bcu_inflow = fe.DirichletBC(self.U_space, self.u_in, inflow)
         bcu_walls = fe.DirichletBC(self.U_space, no_slip, walls)
         bcu_cyl = fe.DirichletBC(self.U_space, no_slip, cylinder)
-        bcu = [bcu_inflow, bcu_walls, bcu_cyl]
+
+        # set the BC's
+        self.bcu = [bcu_inflow, bcu_walls, bcu_cyl]
+        self.bcp = fe.DirichletBC(self.P_space, fe.Constant(0.), outflow)
 
         nu = fe.Constant(self.nu)
         rho = fe.Constant(self.rho)
@@ -272,28 +258,71 @@ class NSTwoSplit:
         p = fe.TrialFunction(self.P_space)
         q = fe.TestFunction(self.P_space)
 
-        self.u_star = fe.Function(self.U_space)
+        # functions on u-space
+        self.u = fe.Function(self.U_space)
         self.u_prev = fe.Function(self.U_space)
+        self.u_prev_prev = fe.Function(self.U_space)
+        self.u_star = fe.Function(self.U_space)
+
+        # functions on p-space
+        self.p = fe.Function(self.P_space)
         self.p_prev = fe.Function(self.P_space)
-        self.phi = fe.Function(self.P_space)
 
         # step one: solve for u_star
-        u_mid = (u + self.u_prev) / 2
+        u_mid = 0.5 * (u + self.u_prev)
         F1 = (fe.inner(u - self.u_prev, v) / dt * fe.dx
-              + fe.inner(fe.dot(self.u_prev, fe.nabla_grad(self.u_prev)), v) * fe.dx  # advection
+              + fe.inner(fe.dot(1.5 * self.u_prev - 0.5 * self.u_prev_prev,
+                                fe.nabla_grad(u_mid)), v) * fe.dx
               + nu * fe.inner(fe.grad(u_mid), fe.grad(v)) * fe.dx  # dissipation
-              - (1 / rho) * fe.inner(self.p_prev, fe.div(v)) * fe.dx)   # pressure gradient
+              - (1 / rho) * fe.dot(self.p_prev, fe.div(v)) * fe.dx)   # pressure gradient
         self.a1, self.l1 = fe.lhs(F1), fe.rhs(F1)
         self.A1 = fe.assemble(self.a1)
 
         # step two: solve for pressure
-        F2 = (fe.inner(fe.grad(p), fe.grad(q)) * fe.dx
-              - rho / dt * fe.inner(fe.div(self.u_star), q) * fe.dx)
+        F2 = (0.5 * fe.inner(fe.grad(p - self.p_prev), fe.grad(q)) * fe.dx
+              + rho / dt * fe.inner(fe.div(self.u_star), q) * fe.dx)
         self.a2, self.l2 = fe.lhs(F2), fe.rhs(F2)
         self.A2 = fe.assemble(self.a2)
 
         # step three: solve for pressure-corrected velocity
         F3 = (fe.inner(u - self.u_star, v) * fe.dx
-              + rho * dt * fe.inner(fe.grad(self.phi), v) * fe.dx)
+              + (dt / rho) * 0.5 * fe.inner(fe.grad(self.p - self.p_prev), v) * fe.dx)
         self.a3, self.l3 = fe.lhs(F3), fe.rhs(F3)
         self.A3 = fe.assemble(self.a3)
+
+    def solve(self, t):
+        self.u_in.t = t
+
+        # first solve for tentative velocity
+        b1 = fe.assemble(self.l1)
+        for bc in self.bcu:
+            bc.apply(self.A1, b1)
+        fe.solve(self.A1, self.u_star.vector(), b1, "gmres", "sor")
+
+        # second solve for updated pressure
+        b2 = fe.assemble(self.l2)
+        self.bcp.apply(self.A2, b2)
+        fe.solve(self.A2, self.p.vector(), b2, "gmres", "amg")
+
+        # third solve for corrected velocity
+        b3 = fe.assemble(self.l3)
+        fe.solve(self.A3, self.u.vector(), b3, "gmres", "sor")
+
+        # and set the previous values
+        fe.assign(self.u_prev_prev, self.u_prev)
+        fe.assign(self.u_prev, self.u)
+        fe.assign(self.p_prev, self.p)
+
+    def setup_checkpoint(self, checkpoint_file):
+        """ Set up the checkpoint file, writing the appropriate things etc. """
+        logger.info(f"storing outputs in {checkpoint_file}")
+        self.checkpoint = fe.HDF5File(
+            self.mesh.mpi_comm(), checkpoint_file, "w")
+
+    def checkpoint_save(self, t):
+        """ Save the simulation at the current time. """
+        self.checkpoint.write(self.u, "/u", t)
+        self.checkpoint.write(self.p, "/p", t)
+
+    def checkpoint_close(self):
+        self.checkpoint.close()
