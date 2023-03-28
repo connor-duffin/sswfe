@@ -145,8 +145,8 @@ class NSSemiImplicit(NSTwo):
         self.krylov_solver.set_operator(self.A)
         self.krylov_solver.set_from_options()
 
-        self.krylov_solver.parameters["absolute_tolerance"] = 1e-10
-        self.krylov_solver.parameters["relative_tolerance"] = 1e-7
+        self.krylov_solver.parameters["absolute_tolerance"] = 1e-8
+        self.krylov_solver.parameters["relative_tolerance"] = 1e-6
         self.krylov_solver.parameters["maximum_iterations"] = 1000
         self.krylov_solver.parameters["report"] = False
 
