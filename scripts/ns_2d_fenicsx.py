@@ -8,29 +8,33 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from dolfinx.cpp.mesh import to_type, cell_entity_type
-from dolfinx.fem import (Constant, Function, FunctionSpace, 
-                         assemble_scalar, dirichletbc, form, locate_dofs_topological, set_bc)
-from dolfinx.fem.petsc import (apply_lifting, assemble_matrix, assemble_vector, 
+from dolfinx.fem import (Constant, Function, FunctionSpace, assemble_scalar,
+                         dirichletbc, form, locate_dofs_topological, set_bc)
+from dolfinx.fem.petsc import (apply_lifting, assemble_matrix, assemble_vector,
                                create_vector, create_matrix, set_bc)
 from dolfinx.graph import create_adjacencylist
-from dolfinx.geometry import BoundingBoxTree, compute_collisions, compute_colliding_cells
-from dolfinx.io import (VTXWriter, distribute_entity_data, gmshio)
+from dolfinx.geometry import (BoundingBoxTree, compute_collisions,
+                              compute_colliding_cells)
+from dolfinx.io import (XDMFFile, VTKFile, distribute_entity_data, gmshio)
 from dolfinx.mesh import create_mesh, meshtags_from_entities
 
-from ufl import (FacetNormal, FiniteElement, Identity, Measure, TestFunction, TrialFunction, VectorElement,
-                 as_vector, div, dot, ds, dx, inner, lhs, grad, nabla_grad, rhs, sym)
+from ufl import (FacetNormal, FiniteElement, Identity, Measure,
+                 TestFunction, TrialFunction, VectorElement, as_vector, div,
+                 dot, ds, dx, inner, lhs, grad, nabla_grad, rhs, sym)
 
 gmsh.initialize()
 
-L = 2.2
-H = 0.41
-c_x = c_y =0.2
+L = 5.46
+H = 1.85
+c_x = L / 2
+c_y = H / 2
 r = 0.05
 gdim = 2
 mesh_comm = MPI.COMM_WORLD
 model_rank = 0
+
 if mesh_comm.rank == model_rank:
-    rectangle = gmsh.model.occ.addRectangle(0,0,0, L, H, tag=1)
+    rectangle = gmsh.model.occ.addRectangle(0, 0, 0, L, H, tag=1)
     obstacle = gmsh.model.occ.addDisk(c_x, c_y, 0, r, r)
 
 if mesh_comm.rank == model_rank:
@@ -96,24 +100,13 @@ if mesh_comm.rank == model_rank:
     gmsh.model.mesh.generate(gdim)
     gmsh.model.mesh.setOrder(2)
     gmsh.model.mesh.optimize("Netgen")
+    # gmsh.fltk.run()
 
-mesh, _, ft = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=gdim)
+
+mesh, _, ft = gmshio.model_to_mesh(
+    gmsh.model, mesh_comm, model_rank, gdim=gdim)
 ft.name = "Facet markers"
 
-t = 0
-T = 8                       # Final time
-dt = 1/1600                 # Time step size
-num_steps = int(T/dt)
-k = Constant(mesh, PETSc.ScalarType(dt))        
-mu = Constant(mesh, PETSc.ScalarType(0.001))  # Dynamic viscosity
-rho = Constant(mesh, PETSc.ScalarType(1))     # Density
-
-v_cg2 = VectorElement("CG", mesh.ufl_cell(), 2)
-s_cg1 = FiniteElement("CG", mesh.ufl_cell(), 1)
-V = FunctionSpace(mesh, v_cg2)
-Q = FunctionSpace(mesh, s_cg1)
-
-fdim = mesh.topology.dim - 1
 
 # Define boundary conditions
 class InletVelocity():
@@ -121,137 +114,191 @@ class InletVelocity():
         self.t = t
 
     def __call__(self, x):
-        values = np.zeros((gdim, x.shape[1]),dtype=PETSc.ScalarType)
-        values[0] = 4 * 1.5 * np.sin(self.t * np.pi/8) * x[1] * (0.41 - x[1])/(0.41**2)
+        values = np.zeros((gdim, x.shape[1]), dtype=PETSc.ScalarType)
+        values[0] = 0.02
         return values
 
-# Inlet
-u_inlet = Function(V)
-inlet_velocity = InletVelocity(t)
-u_inlet.interpolate(inlet_velocity)
-bcu_inflow = dirichletbc(u_inlet, locate_dofs_topological(V, fdim, ft.find(inlet_marker)))
-# Walls
-u_nonslip = np.array((0,) * mesh.geometry.dim, dtype=PETSc.ScalarType)
-bcu_walls = dirichletbc(u_nonslip, locate_dofs_topological(V, fdim, ft.find(wall_marker)), V)
-# Obstacle
-bcu_obstacle = dirichletbc(u_nonslip, locate_dofs_topological(V, fdim, ft.find(obstacle_marker)), V)
-bcu = [bcu_inflow, bcu_obstacle, bcu_walls]
-# Outlet
-bcp_outlet = dirichletbc(PETSc.ScalarType(0), locate_dofs_topological(Q, fdim, ft.find(outlet_marker)), Q)
-bcp = [bcp_outlet]
 
-u = TrialFunction(V)
-v = TestFunction(V)
-u_ = Function(V)
-u_.name = "u"
-u_s = Function(V)
-u_n = Function(V)
-u_n1 = Function(V)
-p = TrialFunction(Q)
-q = TestFunction(Q)
-p_ = Function(Q)
-p_.name = "p"
-phi = Function(Q)
+# Navier-Stokes solver
+# HACK(connor): basically a huge closure over all the mesh
+class NSSplit:
+    def __init__(self, dt, params):
+        self.dt = Constant(mesh, PETSc.ScalarType(dt))
+        self.mu = Constant(mesh, PETSc.ScalarType(params["mu"]))
+        self.rho = Constant(mesh, PETSc.ScalarType(params["rho"]))
 
-f = Constant(mesh, PETSc.ScalarType((0,0)))
-F1 = rho / k * dot(u - u_n, v) * dx 
-F1 += inner(dot(1.5 * u_n - 0.5 * u_n1, 0.5 * nabla_grad(u + u_n)), v) * dx
-F1 += 0.5 * mu * inner(grad(u + u_n), grad(v))*dx - dot(p_, div(v))*dx
-F1 += dot(f, v) * dx
-a1 = form(lhs(F1))
-L1 = form(rhs(F1))
-A1 = create_matrix(a1)
-b1 = create_vector(L1)
+        # setup function spaces
+        v_cg2 = VectorElement("CG", mesh.ufl_cell(), 2)
+        s_cg1 = FiniteElement("CG", mesh.ufl_cell(), 1)
+        self.V = FunctionSpace(mesh, v_cg2)
+        self.Q = FunctionSpace(mesh, s_cg1)
+        self.fdim = mesh.topology.dim - 1
 
-a2 = form(dot(grad(p), grad(q))*dx)
-L2 = form(-rho / k * dot(div(u_s), q) * dx)
-A2 = assemble_matrix(a2, bcs=bcp)
-A2.assemble()
-b2 = create_vector(L2)
+    def setup_form(self):
+        # Inlet
+        self.u_inlet = Function(self.V)
+        self.inlet_velocity = InletVelocity(t)
+        self.u_inlet.interpolate(self.inlet_velocity)
+        bcu_inflow = dirichletbc(self.u_inlet,
+                                 locate_dofs_topological(
+                                     self.V, self.fdim, ft.find(inlet_marker)))
 
-a3 = form(rho * dot(u, v)*dx)
-L3 = form(rho * dot(u_s, v)*dx - k * dot(nabla_grad(phi), v)*dx)
-A3 = assemble_matrix(a3)
-A3.assemble()
-b3 = create_vector(L3)
+        # Walls
+        u_nonslip = np.array((0,) * mesh.geometry.dim, dtype=PETSc.ScalarType)
+        bcu_walls = dirichletbc(u_nonslip,
+                                locate_dofs_topological(
+                                    self.V, self.fdim, ft.find(wall_marker)), self.V)
 
-# Solver for step 1
-solver1 = PETSc.KSP().create(mesh.comm)
-solver1.setOperators(A1)
-solver1.setType(PETSc.KSP.Type.BCGS)
-pc1 = solver1.getPC()
-pc1.setType(PETSc.PC.Type.JACOBI)
+        # Obstacle
+        bcu_obstacle = dirichletbc(u_nonslip,
+                                   locate_dofs_topological(
+                                       self.V, self.fdim, ft.find(obstacle_marker)), self.V)
+        self.bcu = [bcu_inflow, bcu_obstacle, bcu_walls]
 
-# Solver for step 2
-solver2 = PETSc.KSP().create(mesh.comm)
-solver2.setOperators(A2)
-solver2.setType(PETSc.KSP.Type.MINRES)
-pc2 = solver2.getPC()
-pc2.setType(PETSc.PC.Type.HYPRE)
-pc2.setHYPREType("boomeramg")
+        # Outlet
+        bcp_outlet = dirichletbc(PETSc.ScalarType(0.),
+                                 locate_dofs_topological(self.Q, self.fdim, ft.find(outlet_marker)), self.Q)
+        self.bcp = [bcp_outlet]
 
-# Solver for step 3
-solver3 = PETSc.KSP().create(mesh.comm)
-solver3.setOperators(A3)
-solver3.setType(PETSc.KSP.Type.CG)
-pc3 = solver3.getPC()
-pc3.setType(PETSc.PC.Type.SOR)
+        # trial/test functions used for form creation, only.
+        u = TrialFunction(self.V)
+        v = TestFunction(self.V)
+        p = TrialFunction(self.Q)
+        q = TestFunction(self.Q)
 
-vtx_u = VTXWriter(mesh.comm, "dfg2D-3-u.bp", [u_])
-vtx_p = VTXWriter(mesh.comm, "dfg2D-3-p.bp", [p_])
-vtx_u.write(t)
-vtx_p.write(t)
+        self.u_ = Function(self.V)
+        self.u_.name = "u"
+        self.u_s = u_s = Function(self.V)
+        self.u_n = u_n = Function(self.V)
+        self.u_n1 = u_n1 = Function(self.V)
+
+        self.p_ = p_ = Function(self.Q)
+        self.p_.name = "p"
+        self.phi = phi = Function(self.Q)
+
+        f = Constant(mesh, PETSc.ScalarType((0, 0)))
+        F1 = self.rho / self.dt * dot(u - u_n, v) * dx
+        F1 += inner(dot(1.5 * u_n - 0.5 * u_n1,
+                        0.5 * nabla_grad(u + u_n)), v) * dx
+        F1 += 0.5 * self.mu * inner(grad(u + u_n),
+                                    grad(v))*dx - dot(p_, div(v)) * dx
+        F1 += dot(f, v) * dx
+
+        self.a1 = form(lhs(F1))
+        self.L1 = form(rhs(F1))
+        self.A1 = create_matrix(self.a1)
+        self.b1 = create_vector(self.L1)
+
+        self.a2 = form(dot(grad(p), grad(q))*dx)
+        self.L2 = form(-self.rho / self.dt * dot(div(self.u_s), q) * dx)
+        self.A2 = assemble_matrix(self.a2, bcs=self.bcp)
+        self.A2.assemble()
+        self.b2 = create_vector(self.L2)
+
+        self.a3 = form(self.rho * dot(u, v)*dx)
+        self.L3 = form(self.rho * dot(u_s, v)*dx
+                       - self.dt * dot(nabla_grad(phi), v)*dx)
+        self.A3 = assemble_matrix(self.a3)
+        self.A3.assemble()
+        self.b3 = create_vector(self.L3)
+
+        # solver for step 1
+        self.solver1 = PETSc.KSP().create(mesh.comm)
+        self.solver1.setOperators(self.A1)
+        self.solver1.setType(PETSc.KSP.Type.BCGS)
+        pc1 = self.solver1.getPC()
+        pc1.setType(PETSc.PC.Type.JACOBI)
+
+        # solver for step 2
+        self.solver2 = PETSc.KSP().create(mesh.comm)
+        self.solver2.setOperators(self.A2)
+        self.solver2.setType(PETSc.KSP.Type.MINRES)
+        pc2 = self.solver2.getPC()
+        pc2.setType(PETSc.PC.Type.HYPRE)
+        pc2.setHYPREType("boomeramg")
+
+        # solver for step 3
+        self.solver3 = PETSc.KSP().create(mesh.comm)
+        self.solver3.setOperators(self.A3)
+        self.solver3.setType(PETSc.KSP.Type.CG)
+        pc3 = self.solver3.getPC()
+        pc3.setType(PETSc.PC.Type.SOR)
+
+    def solve(self, t):
+        self.inlet_velocity.t = t
+        self.u_inlet.interpolate(self.inlet_velocity)
+
+        # step 1: tentative velocity step
+        self.A1.zeroEntries()
+        assemble_matrix(self.A1, self.a1, bcs=self.bcu)
+        self.A1.assemble()
+        with self.b1.localForm() as loc:
+            loc.set(0)
+        assemble_vector(self.b1, self.L1)
+        apply_lifting(self.b1, [self.a1], [self.bcu])
+        self.b1.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
+                            mode=PETSc.ScatterMode.REVERSE)
+        set_bc(self.b1, self.bcu)
+        self.solver1.solve(self.b1, self.u_s.vector)
+        self.u_s.x.scatter_forward()
+
+        # step 2: pressure corrrection step
+        with self.b2.localForm() as loc:
+            loc.set(0)
+        assemble_vector(self.b2, self.L2)
+        apply_lifting(self.b2, [self.a2], [self.bcp])
+        self.b2.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
+                            mode=PETSc.ScatterMode.REVERSE)
+        set_bc(self.b2, self.bcp)
+        self.solver2.solve(self.b2, self.phi.vector)
+        self.phi.x.scatter_forward()
+
+        self.p_.vector.axpy(1, self.phi.vector)
+        self.p_.x.scatter_forward()
+
+        # step 3: velocity correction step
+        with self.b3.localForm() as loc:
+            loc.set(0)
+        assemble_vector(self.b3, self.L3)
+        self.b3.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
+                            mode=PETSc.ScatterMode.REVERSE)
+        self.solver3.solve(self.b3, self.u_.vector)
+        self.u_.x.scatter_forward()
+
+        # update variable with solution form this time step
+        with self.u_.vector.localForm() as loc_, self.u_n.vector.localForm() as loc_n, self.u_n1.vector.localForm() as loc_n1:
+            loc_n.copy(loc_n1)
+            loc_.copy(loc_n)
+
+
+t = 0
+T = 120
+dt = 1e-4
+num_steps = int(T / dt)
+
+params = dict(mu=0.1, rho=1000)
+ns = NSSplit(dt, params)
+ns.setup_form()
+
+u_out = XDMFFile(mesh.comm, "outputs/dfg2D-3-u.bp", "w")
+p_out = XDMFFile(mesh.comm, "outputs/dfg2D-3-p.bp", "w")
+for out in [u_out, p_out]:
+    out.write_mesh(mesh)
+
+u_out.write_function(ns.u_, t)
+p_out.write_function(ns.p_, t)
+
 progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=num_steps)
 for i in range(num_steps):
     progress.update(1)
+
     # Update current time step
     t += dt
-    # Update inlet velocity
-    inlet_velocity.t = t
-    u_inlet.interpolate(inlet_velocity)
 
-    # Step 1: Tentative velocity step
-    A1.zeroEntries()
-    assemble_matrix(A1, a1, bcs=bcu)
-    A1.assemble()
-    with b1.localForm() as loc:
-        loc.set(0)
-    assemble_vector(b1, L1)
-    apply_lifting(b1, [a1], [bcu])
-    b1.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
-    set_bc(b1, bcu)
-    solver1.solve(b1, u_s.vector)
-    u_s.x.scatter_forward()
+    # solve and write solutions to file
+    ns.solve(t)
+    u_out.write_function(ns.u_, t)
+    p_out.write_function(ns.p_, t)
 
-    # Step 2: Pressure corrrection step
-    with b2.localForm() as loc:
-        loc.set(0)
-    assemble_vector(b2, L2)
-    apply_lifting(b2, [a2], [bcp])
-    b2.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
-    set_bc(b2, bcp)
-    solver2.solve(b2, phi.vector)
-    phi.x.scatter_forward()
-
-    p_.vector.axpy(1, phi.vector)
-    p_.x.scatter_forward()
-
-    # Step 3: Velocity correction step
-    with b3.localForm() as loc:
-        loc.set(0)
-    assemble_vector(b3, L3)
-    b3.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
-    solver3.solve(b3, u_.vector)
-    u_.x.scatter_forward()
-
-    # Write solutions to file
-    vtx_u.write(t)
-    vtx_p.write(t)
-
-    # Update variable with solution form this time step
-    with u_.vector.localForm() as loc_, u_n.vector.localForm() as loc_n, u_n1.vector.localForm() as loc_n1:
-        loc_n.copy(loc_n1)
-        loc_.copy(loc_n)
-
-vtx_u.close()
-vtx_p.close()
+u_out.close()
+p_out.close()
