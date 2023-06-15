@@ -10,10 +10,17 @@ args = parser.parse_args()
 
 gmsh.initialize()
 
-L = 5.46
-H = 1.85
-c_x = L / 2
-c_y = H / 2
+# paul's settings
+# L = 5.46
+# H = 1.85
+# c_x = L / 2
+# c_y = H / 2
+
+# FEAT settings
+L = 2.2
+H = 0.41
+c_x = c_y = 0.2
+
 r = 0.05
 gdim = 2
 model_rank = 0

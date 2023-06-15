@@ -33,78 +33,8 @@ gdim = 2
 mesh_comm = MPI.COMM_WORLD
 model_rank = 0
 
-if mesh_comm.rank == model_rank:
-    rectangle = gmsh.model.occ.addRectangle(0, 0, 0, L, H, tag=1)
-    obstacle = gmsh.model.occ.addDisk(c_x, c_y, 0, r, r)
-
-if mesh_comm.rank == model_rank:
-    fluid = gmsh.model.occ.cut([(gdim, rectangle)], [(gdim, obstacle)])
-    gmsh.model.occ.synchronize()
-
-fluid_marker = 1
-if mesh_comm.rank == model_rank:
-    volumes = gmsh.model.getEntities(dim=gdim)
-    assert(len(volumes) == 1)
-    gmsh.model.addPhysicalGroup(volumes[0][0], [volumes[0][1]], fluid_marker)
-    gmsh.model.setPhysicalName(volumes[0][0], fluid_marker, "Fluid")
-
-inlet_marker, outlet_marker, wall_marker, obstacle_marker = 2, 3, 4, 5
-inflow, outflow, walls, obstacle = [], [], [], []
-if mesh_comm.rank == model_rank:
-    boundaries = gmsh.model.getBoundary(volumes, oriented=False)
-    for boundary in boundaries:
-        center_of_mass = gmsh.model.occ.getCenterOfMass(boundary[0], boundary[1])
-        if np.allclose(center_of_mass, [0, H/2, 0]):
-            inflow.append(boundary[1])
-        elif np.allclose(center_of_mass, [L, H/2, 0]):
-            outflow.append(boundary[1])
-        elif np.allclose(center_of_mass, [L/2, H, 0]) or np.allclose(center_of_mass, [L/2, 0, 0]):
-            walls.append(boundary[1])
-        else:
-            obstacle.append(boundary[1])
-    gmsh.model.addPhysicalGroup(1, walls, wall_marker)
-    gmsh.model.setPhysicalName(1, wall_marker, "Walls")
-    gmsh.model.addPhysicalGroup(1, inflow, inlet_marker)
-    gmsh.model.setPhysicalName(1, inlet_marker, "Inlet")
-    gmsh.model.addPhysicalGroup(1, outflow, outlet_marker)
-    gmsh.model.setPhysicalName(1, outlet_marker, "Outlet")
-    gmsh.model.addPhysicalGroup(1, obstacle, obstacle_marker)
-    gmsh.model.setPhysicalName(1, obstacle_marker, "Obstacle")
-
-# Create distance field from obstacle.
-# Add threshold of mesh sizes based on the distance field
-# LcMax -                  /--------
-#                      /
-# LcMin -o---------/
-#        |         |       |
-#       Point    DistMin DistMax
-res_min = r / 3
-if mesh_comm.rank == model_rank:
-    distance_field = gmsh.model.mesh.field.add("Distance")
-    gmsh.model.mesh.field.setNumbers(distance_field, "EdgesList", obstacle)
-    threshold_field = gmsh.model.mesh.field.add("Threshold")
-    gmsh.model.mesh.field.setNumber(threshold_field, "IField", distance_field)
-    gmsh.model.mesh.field.setNumber(threshold_field, "LcMin", res_min)
-    gmsh.model.mesh.field.setNumber(threshold_field, "LcMax", 0.25 * H)
-    gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", r)
-    gmsh.model.mesh.field.setNumber(threshold_field, "DistMax", 2 * H)
-    min_field = gmsh.model.mesh.field.add("Min")
-    gmsh.model.mesh.field.setNumbers(min_field, "FieldsList", [threshold_field])
-    gmsh.model.mesh.field.setAsBackgroundMesh(min_field)
-
-if mesh_comm.rank == model_rank:
-    gmsh.option.setNumber("Mesh.Algorithm", 8)
-    # gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
-    # gmsh.option.setNumber("Mesh.RecombineAll", 1)
-    # gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)
-    gmsh.model.mesh.generate(gdim)
-    gmsh.model.mesh.setOrder(2)
-    gmsh.model.mesh.optimize("Netgen")
-    # gmsh.fltk.run()
-
-
-mesh, _, ft = gmshio.model_to_mesh(
-    gmsh.model, mesh_comm, model_rank, gdim=gdim)
+mesh, _, ft = gmshio.read_from_msh(
+    "mesh/branson-refined.msh", mesh_comm, model_rank, gdim=2)
 ft.name = "Facet markers"
 
 
@@ -115,7 +45,7 @@ class InletVelocity():
 
     def __call__(self, x):
         values = np.zeros((gdim, x.shape[1]), dtype=PETSc.ScalarType)
-        values[0] = 0.02
+        values[0] = 0.01
         return values
 
 
@@ -135,6 +65,9 @@ class NSSplit:
         self.fdim = mesh.topology.dim - 1
 
     def setup_form(self):
+        # mark relevant parts of the domain
+        inlet_marker, outlet_marker, wall_marker, obstacle_marker = 2, 3, 4, 5
+
         # Inlet
         self.u_inlet = Function(self.V)
         self.inlet_velocity = InletVelocity(t)
@@ -273,32 +206,29 @@ class NSSplit:
 
 t = 0
 T = 120
-dt = 1e-4
+dt = 1 / 2000
 num_steps = int(T / dt)
 
-params = dict(mu=0.1, rho=1000)
+params = dict(mu=1e-2, rho=1000)
 ns = NSSplit(dt, params)
 ns.setup_form()
 
-u_out = XDMFFile(mesh.comm, "outputs/dfg2D-3-u.bp", "w")
-p_out = XDMFFile(mesh.comm, "outputs/dfg2D-3-p.bp", "w")
-for out in [u_out, p_out]:
-    out.write_mesh(mesh)
-
-u_out.write_function(ns.u_, t)
-p_out.write_function(ns.p_, t)
+u_viewer = PETSc.Viewer().createMPIIO(
+    "outputs/branson-testing-u.dat", "w", mesh_comm)
+p_viewer = PETSc.Viewer().createMPIIO(
+    "outputs/branson-testing-p.dat", "w", mesh_comm)
 
 progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=num_steps)
 for i in range(num_steps):
     progress.update(1)
 
-    # Update current time step
     t += dt
-
-    # solve and write solutions to file
     ns.solve(t)
-    u_out.write_function(ns.u_, t)
-    p_out.write_function(ns.p_, t)
 
-u_out.close()
-p_out.close()
+    # check for divergences
+    if ((not np.any(np.isnan(ns.u_.vector.array))) and (not np.any(np.isnan(ns.p_.vector.array)))):
+        ns.u_.vector.view(u_viewer)
+        ns.p_.vector.view(p_viewer)
+    else:
+        print(f"simulation failed at t = {t:.4e}")
+        break
