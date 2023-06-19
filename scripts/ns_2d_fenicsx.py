@@ -35,10 +35,9 @@ class InletVelocity():
         values[0] = 0.01
         return values
 
-
 # Navier-Stokes solver
 class NSSplit:
-    def __init__(self, mesh_file, dt, params):
+    def __init__(self, mesh, dt, params):
         # L = 5.46
         # H = 1.85
         # c_x = L / 2
@@ -47,9 +46,15 @@ class NSSplit:
         mesh_comm = MPI.COMM_WORLD
         model_rank = 0
 
-        self.msh, _, self.ft = gmshio.read_from_msh(
-            mesh_file, mesh_comm, model_rank, gdim=gdim)
-        self.ft.name = "Facet markers"
+        if type(mesh) == str:
+            self.msh, _, self.ft = gmshio.read_from_msh(
+                mesh_file, mesh_comm, model_rank, gdim=gdim)
+            self.ft.name = "Facet markers"
+        elif type(mesh) == tuple:
+            self.msh, self.ft = mesh
+        else:
+            print("Expected either (msh, ft) or string for mesh")
+            raise ValueError
 
         self.dt = Constant(self.msh, PETSc.ScalarType(dt))
         self.mu = Constant(self.msh, PETSc.ScalarType(params["mu"]))
@@ -65,6 +70,12 @@ class NSSplit:
         self.Q = FunctionSpace(self.msh, s_cg1)
         self.Q_dof_coordinates = self.Q.tabulate_dof_coordinates()
         self.fdim = self.msh.topology.dim - 1
+
+        # self.u_inlet = Function(self.V)
+        # self.inlet_velocity = InletVelocity(t)
+        # self.u_inlet.interpolate(self.inlet_velocity)
+        # or just a const.
+        # self.u_inlet = np.array((0.01, 0), dtype=PETSc.ScalarType)
 
     def setup_form(self):
         # HACK(connor): hardcode and mark relevant parts of the domain
@@ -84,14 +95,15 @@ class NSSplit:
             self.V)
 
         # Inlet
-        # self.u_inlet = Function(self.V)
-        # self.inlet_velocity = InletVelocity(t)
-        # self.u_inlet.interpolate(self.inlet_velocity)
-        u_inlet = np.array((0.01, 0), dtype=PETSc.ScalarType)
-        bcu_inflow = dirichletbc(
-            u_inlet,
-            locate_dofs_topological(self.V, self.fdim, self.ft.find(inlet_marker)),
-            self.V)
+        if type(self.u_inlet) == np.ndarray:
+            bcu_inflow = dirichletbc(
+                self.u_inlet,
+                locate_dofs_topological(self.V, self.fdim, self.ft.find(inlet_marker)),
+                self.V)
+        else:
+            bcu_inflow = dirichletbc(
+                self.u_inlet,
+                locate_dofs_topological(self.V, self.fdim, self.ft.find(inlet_marker)))
         self.bcu = [bcu_inflow, bcu_obstacle, bcu_walls]
 
         # Outlet
@@ -121,8 +133,7 @@ class NSSplit:
         F1 = self.rho / self.dt * dot(u - u_n, v) * dx
         F1 += inner(dot(1.5 * u_n - 0.5 * u_n1,
                         0.5 * nabla_grad(u + u_n)), v) * dx
-        F1 += 0.5 * self.mu * inner(grad(u + u_n),
-                                    grad(v))*dx - dot(p_, div(v)) * dx
+        F1 += 0.5 * self.mu * inner(grad(u + u_n), grad(v))*dx - dot(p_, div(v)) * dx
         F1 += dot(f, v) * dx
 
         self.a1 = form(lhs(F1))
@@ -166,9 +177,6 @@ class NSSplit:
         pc3.setType(PETSc.PC.Type.SOR)
 
     def solve(self, t):
-        # self.inlet_velocity.t = t
-        # self.u_inlet.interpolate(self.inlet_velocity)
-
         # step 1: tentative velocity step
         self.A1.zeroEntries()
         assemble_matrix(self.A1, self.a1, bcs=self.bcu)
@@ -212,54 +220,3 @@ class NSSplit:
               self.u_n1.vector.localForm() as loc_n1):
             loc_n.copy(loc_n1)
             loc_.copy(loc_n)
-
-
-if __name__ == "__main__":
-    t = 0
-    T = 60.
-    dt = 1e-3
-    nt = int(T / dt)
-    thin = 100
-    nt_save = nt // thin
-
-    if nt % thin >= 1:
-        nt_save += 1
-
-    params = dict(mu=1e-3, rho=1000)
-    mesh_file = "mesh/branson-refined.msh"
-    ns = NSSplit(mesh_file, dt, params)
-    ns.setup_form()
-
-    output_file = "outputs/branson-testing.h5"
-    output = h5py.File(output_file, "w")
-
-    metadata = params
-    for name, val in metadata.items():
-        output.attrs.create(name, val)
-
-    n_dofs_u = ns.V_dof_coordinates.shape[0]
-    n_dofs_p = ns.Q_dof_coordinates.shape[0]
-
-    t_out = output.create_dataset("t", shape=(nt_save, ), dtype=np.float64)
-    u_out = output.create_dataset("u_mean", shape=(nt_save, 2 * n_dofs_u), dtype=np.float64)
-    p_out = output.create_dataset("p_mean", shape=(nt_save, n_dofs_p), dtype=np.float64)
-
-    i_save = 0
-    progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=nt)
-    for i in range(nt):
-        progress.update(1)
-
-        t += dt
-        ns.solve(t)
-
-        # check for NaNs
-        if (np.any(np.isnan(ns.u_.vector.array)) and np.any(np.isnan(ns.p_.vector.array))):
-            print(f"Simulation failed at t = {t:.4e}")
-            break
-
-        # store outputs
-        if i % thin == 0:
-            t_out[i_save] = t
-            u_out[i_save, :] = ns.u_.vector.array.copy()
-            p_out[i_save, :] = ns.p_.vector.array.copy()
-            i_save += 1
