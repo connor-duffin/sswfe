@@ -5,17 +5,31 @@ import matplotlib.pyplot as plt
 import tqdm.autonotebook
 
 from ns_2d_fenicsx import NSSplit
-from dolfinx.io import gmshio
-from dolfinx.fem import (Constant, Function, FunctionSpace)
+
+from dolfinx.cpp.mesh import to_type, cell_entity_type
+from dolfinx.fem import (Constant, Function, FunctionSpace, assemble_scalar,
+                         dirichletbc, form, locate_dofs_topological, set_bc)
+from dolfinx.fem.petsc import (apply_lifting, assemble_matrix, assemble_vector,
+                               create_vector, create_matrix, set_bc)
+from dolfinx.graph import create_adjacencylist
 from dolfinx.geometry import (BoundingBoxTree, compute_collisions,
                               compute_colliding_cells)
+from dolfinx.io import (XDMFFile, VTKFile, distribute_entity_data, gmshio)
+from dolfinx.mesh import create_mesh, meshtags_from_entities
+
+from dolfinx.fem.petsc import NonlinearProblem
+from dolfinx.nls.petsc import NewtonSolver
+
+import ufl
+
 from mpi4py import MPI
 from petsc4py import PETSc
 
-L = 2.2
-H = 0.41
-c_x = c_y = 0.2
-r = 0.05
+d = 0.04  # 4cm
+L = 25 * d
+H = 14 * d
+c_x = 5 * d
+c_y = 7 * d
 gdim = 2
 mesh_comm = MPI.COMM_WORLD
 model_rank = 0
@@ -24,7 +38,7 @@ gmsh.initialize()
 
 if mesh_comm.rank == model_rank:
     rectangle = gmsh.model.occ.addRectangle(0, 0, 0, L, H, tag=1)
-    obstacle = gmsh.model.occ.addDisk(c_x, c_y, 0, r, r)
+    obstacle = gmsh.model.occ.addRectangle(4.5 * d, 6.5 * d, 0, d, d)
 
 if mesh_comm.rank == model_rank:
     fluid = gmsh.model.occ.cut([(gdim, rectangle)], [(gdim, obstacle)])
@@ -46,7 +60,6 @@ if mesh_comm.rank == model_rank:
         if np.allclose(center_of_mass, [0, H/2, 0]):
             inflow.append(boundary[1])
         elif np.allclose(center_of_mass, [L, H/2, 0]):
-    
             outflow.append(boundary[1])
         elif np.allclose(center_of_mass, [L/2, H, 0]) or np.allclose(center_of_mass, [L/2, 0, 0]):
             walls.append(boundary[1])
@@ -68,7 +81,7 @@ if mesh_comm.rank == model_rank:
 # LcMin -o---------/
 #        |         |       |
 #       Point    DistMin DistMax
-res_min = r / 10
+res_min = d / 10
 res_max = 0.1 * H
 if mesh_comm.rank == model_rank:
     distance_field = gmsh.model.mesh.field.add("Distance")
@@ -77,7 +90,7 @@ if mesh_comm.rank == model_rank:
     gmsh.model.mesh.field.setNumber(threshold_field, "IField", distance_field)
     gmsh.model.mesh.field.setNumber(threshold_field, "LcMin", res_min)
     gmsh.model.mesh.field.setNumber(threshold_field, "LcMax", res_max)
-    gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", r)
+    gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", d)
     gmsh.model.mesh.field.setNumber(threshold_field, "DistMax", 2 * H)
     min_field = gmsh.model.mesh.field.add("Min")
     gmsh.model.mesh.field.setNumbers(min_field, "FieldsList", [threshold_field])
@@ -86,21 +99,13 @@ if mesh_comm.rank == model_rank:
 
 if mesh_comm.rank == model_rank:
     gmsh.option.setNumber("Mesh.Algorithm", 8)
-    # gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
-    # gmsh.option.setNumber("Mesh.RecombineAll", 1)
-    # gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)
     gmsh.model.mesh.generate(gdim)
     gmsh.model.mesh.setOrder(2)
     gmsh.model.mesh.optimize("Netgen")
+    # gmsh.fltk.run()
 
-mesh, _, ft = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=gdim)
+msh, _, ft = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=gdim)
 ft.name = "Facet markers"
-
-t = 0.
-T = 8.
-dt = 1 / 1600
-num_steps = int(T/dt)
-params = dict(mu=0.001, rho=1.)
 
 
 # Define boundary conditions
@@ -111,73 +116,53 @@ class InletVelocity():
     def __call__(self, x):
         values = np.zeros((gdim, x.shape[1]),
                           dtype=PETSc.ScalarType)
-        values[0] = 4 * 1.5 * np.sin(self.t * np.pi/8) * x[1] * (0.41 - x[1])/(0.41**2)
+        values[0] = 0.535
         return values
 
 
-# setup base class
-ns = NSSplit((mesh, ft), dt, params)
+t = 0.
+T = 10.
+dt = 5e-4
+nt = int(T/dt)
 
-# setup inflow condition
-ns.u_inlet = Function(ns.V)
-inlet_velocity = InletVelocity(t)
-ns.u_inlet.interpolate(inlet_velocity)
+nu = Constant(msh, PETSc.ScalarType(1e-4))
+g = Constant(msh, PETSc.ScalarType(9.8))
+H = Constant(msh, PETSc.ScalarType(4 * d))
 
-# set the variational form
-ns.setup_form()
+# setup mixed function space
+v_cg2 = ufl.VectorElement("CG", msh.ufl_cell(), 2)
+s_cg1 = ufl.FiniteElement("CG", msh.ufl_cell(), 1)
+W = FunctionSpace(msh, v_cg2 * s_cg1)
 
-tree = BoundingBoxTree(mesh, mesh.geometry.dim)
-points = np.array([[0.15, 0.2, 0], [0.25, 0.2, 0]])
-cell_candidates = compute_collisions(tree, points)
-colliding_cells = compute_colliding_cells(mesh, cell_candidates, points)
-front_cells = colliding_cells.links(0)
-back_cells = colliding_cells.links(1)
+v, q = ufl.TestFunctions(W)
+du = Function(W)
+du_prev = Function(W)
 
-if mesh.comm.rank == 0:
-    tp_diff = np.zeros(num_steps, dtype=PETSc.ScalarType)
-    p_diff = np.zeros(num_steps, dtype=PETSc.ScalarType)
+# set current functions
+u, h = ufl.split(du)
+u_prev, h_prev = ufl.split(du_prev)
 
-progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=num_steps)
-for i in range(num_steps):
-    progress.update(1)
+theta = 0.5
+u_mid = theta * u + (1 - theta) * u_prev
+h_mid = theta * h + (1 - theta) * h_prev
+F = (ufl.inner(u - u_prev, v) / dt * ufl.dx  # mass term u
+     + ufl.inner(h - h_prev, q) / dt * ufl.dx  # mass term h
+     + ufl.inner(ufl.dot(u_mid, ufl.nabla_grad(u_mid)), v) * ufl.dx  # advection
+     + nu * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx  # dissipation
+     + g * ufl.inner(ufl.grad(h_mid), v) * ufl.dx)  # surface term
 
-    t += dt
-    inlet_velocity.t = t
-    ns.u_inlet.interpolate(inlet_velocity)
-    ns.solve(t)
+problem = NonlinearProblem(F, du)
+solver = NewtonSolver(mesh_comm, problem)
+solver.convergence_criterion = "incremental"
+solver.rtol = 1e-6
 
-    # assemble the pressure difference
-    p_front = None
-    if len(front_cells) > 0:
-        p_front = ns.p_.eval(points[0], front_cells[:1])
-    p_front = mesh.comm.gather(p_front, root=0)
+ksp = solver.krylov_solver
+opts = PETSc.Options()
+option_prefix = ksp.getOptionsPrefix()
+opts[f"{option_prefix}ksp_type"] = "preonly"
+opts[f"{option_prefix}pc_type"] = "lu"
+ksp.setFromOptions()
 
-    p_back = None
-    if len(back_cells) > 0:
-        p_back = ns.p_.eval(points[1], back_cells[:1])
-    p_back = mesh.comm.gather(p_back, root=0)
-
-    if mesh.comm.rank == 0:
-        tp_diff[i] = t
-        # Choose first pressure that is found from the different processors
-        for pressure in p_front:
-            if pressure is not None:
-                p_diff[i] = pressure[0]
-                break
-        for pressure in p_back:
-            if pressure is not None:
-                p_diff[i] -= pressure[0]
-                break
-
-if mesh.comm.rank == 0:
-    if not os.path.exists("figures"):
-        os.mkdir("figures")
-
-    print(np.mean(p_diff))
-    fig = plt.figure(figsize=(16, 5))
-    l1 = plt.plot(tp_diff, p_diff, label=r"FEniCSx")
-    plt.title("Pressure difference")
-    plt.grid()
-    plt.legend()
-    plt.savefig("figures/pressure-comparison.png")
-    plt.close()
+for i in range(nt):
+    r = solver.solve(du)
+    du_prev.x.array[:] = du.x.array

@@ -48,12 +48,12 @@ class NSSplit:
 
         if type(mesh) == str:
             self.msh, _, self.ft = gmshio.read_from_msh(
-                mesh_file, mesh_comm, model_rank, gdim=gdim)
+                mesh, mesh_comm, model_rank, gdim=gdim)
             self.ft.name = "Facet markers"
         elif type(mesh) == tuple:
             self.msh, self.ft = mesh
         else:
-            print("Expected either (msh, ft) or string for mesh")
+            print("Expected either tuple (msh, ft) or string for mesh")
             raise ValueError
 
         self.dt = Constant(self.msh, PETSc.ScalarType(dt))

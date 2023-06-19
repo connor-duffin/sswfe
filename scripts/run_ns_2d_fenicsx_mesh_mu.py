@@ -1,17 +1,41 @@
 import os
 import h5py
 import tqdm
+
+import matplotlib.pyplot as plt
 import numpy as np
+
+from dolfinx.fem import Function
+from dolfinx.geometry import (BoundingBoxTree, compute_collisions,
+                              compute_colliding_cells)
 
 from itertools import product
 from multiprocessing import Pool
 from ns_2d_fenicsx import NSSplit
 
+from mpi4py import MPI
+from petsc4py import PETSc
 
-def run_ns_2d(mesh_file, mu, output_file):
+
+mesh_comm = MPI.COMM_WORLD
+model_rank = 0
+
+
+class InletVelocity():
+    def __init__(self, t):
+        self.t = t
+
+    def __call__(self, x):
+        values = np.zeros((2, x.shape[1]),
+                          dtype=PETSc.ScalarType)
+        values[0] = 2.5e-2 * np.sin(2 * np.pi * self.t / 10)
+        return values
+
+
+def run_ns_2d(mesh_file, mu):
     t = 0
-    T = 60
-    dt = 1e-3
+    T = 60.
+    dt = 1e-2
     nt = int(T / dt)
     thin = 100
     nt_save = nt // thin
@@ -20,30 +44,33 @@ def run_ns_2d(mesh_file, mu, output_file):
         nt_save += 1
 
     params = dict(mu=mu, rho=1000)
-    # mesh_file = "mesh/branson-refined.msh"
     ns = NSSplit(mesh_file, dt, params)
+
+    # set inlet velocity
+    inlet_velocity = InletVelocity(0.)
+    ns.u_inlet = Function(ns.V)
+    ns.u_inlet.interpolate(inlet_velocity)
+
+    # then set form
     ns.setup_form()
 
-    # output_file = "outputs/branson-testing.h5"
-    output = h5py.File(output_file, "w")
+    x_eval = [2.88, 0.9, 0]
+    tree = BoundingBoxTree(ns.msh, dim=2)
+    cell_candidates = compute_collisions(tree, x_eval)
+    colliding_cells = compute_colliding_cells(ns.msh, cell_candidates, x_eval)
 
-    metadata = params
-    for name, val in metadata.items():
-        output.attrs.create(name, val)
+    if mesh_comm.rank == 0:
+        t_test = np.zeros(nt, dtype=PETSc.ScalarType)
+        u_test = np.zeros(nt, dtype=PETSc.ScalarType)
+        v_test = np.zeros(nt, dtype=PETSc.ScalarType)
 
-    n_dofs_u = ns.V_dof_coordinates.shape[0]
-    n_dofs_p = ns.Q_dof_coordinates.shape[0]
-
-    t_out = output.create_dataset("t", shape=(nt_save, ), dtype=np.float64)
-    u_out = output.create_dataset("u_mean", shape=(nt_save, 2 * n_dofs_u), dtype=np.float64)
-    p_out = output.create_dataset("p_mean", shape=(nt_save, n_dofs_p), dtype=np.float64)
-
-    i_save = 0
     progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=nt)
     for i in range(nt):
         progress.update(1)
 
         t += dt
+        inlet_velocity.t = t
+        ns.u_inlet.interpolate(inlet_velocity)
         ns.solve(t)
 
         # check for NaNs
@@ -51,28 +78,34 @@ def run_ns_2d(mesh_file, mu, output_file):
             print(f"Simulation failed at t = {t:.4e}")
             break
 
-        # store outputs
-        if i % thin == 0:
-            t_out[i_save] = t
-            u_out[i_save, :] = ns.u_.vector.array.copy()
-            p_out[i_save, :] = ns.p_.vector.array.copy()
-            i_save += 1
+        # assemble the pressure difference
+        u_flow = None
+        if len(colliding_cells) > 0:
+            u_flow = ns.u_.eval(x_eval, colliding_cells[:1])
 
-    output.close()
+        u_flow = mesh_comm.gather(u_flow, root=0)
+        if mesh_comm.rank == 0:
+            t_test[i] = t
+
+            for u in u_flow:
+                if u is not None:
+                    u_test[i] = u[0]
+                    v_test[i] = u[1]
+                    break
+
+    if mesh_comm.rank == 0:
+        print(u_test, v_test)
+
+        fig, axs = plt.subplots(
+            1, 2, constrained_layout=True, figsize=(8, 3))
+        axs[0].plot(t_test, u_test)
+        axs[0].set_ylabel(r"$u$")
+        axs[1].plot(t_test, v_test)
+        axs[1].set_ylabel(r"$v$")
+        for ax in axs:
+            ax.set_xlabel(r"$t$")
+        plt.savefig("figures/u-observed.png")
+        plt.close()
 
 
-if __name__ == "__main__":
-    mus = [1e-3, 1e-2, 1e-1, 1.]
-    mesh_files = [f"mesh/branson-{i}.msh" for i in range(4)]
-
-    model_args = []
-    for a in product(mesh_files, mus):
-        mesh_file, mu = a
-        output_file = f"outputs/ns-fx-mu-{mu}-{os.path.basename(mesh_file)[:-4]}.h5"
-
-        model_args.append((*a, output_file))
-
-    print(model_args)
-    n_threads = 16
-    p = Pool(n_threads)
-    p.starmap(run_ns_2d, model_args)
+run_ns_2d(mesh_file="mesh/branson-3.msh", mu=0.1)
