@@ -77,7 +77,7 @@ class ShallowTwo:
             self.C = 0.0025
             self.H = 50.
         elif self.simulation in ["cylinder", "laminar"]:
-            self.nu = 1e-6
+            self.nu = 1e-4
             self.C = 0.
             self.H = 0.16
 
