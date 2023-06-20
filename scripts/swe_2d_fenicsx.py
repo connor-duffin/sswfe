@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import tqdm.autonotebook
 
 from ns_2d_fenicsx import NSSplit
+from tqdm import tqdm
 
 from dolfinx.cpp.mesh import to_type, cell_entity_type
 from dolfinx.fem import (Constant, Function, FunctionSpace, assemble_scalar,
@@ -24,6 +25,8 @@ import ufl
 
 from mpi4py import MPI
 from petsc4py import PETSc
+
+import faulthandler
 
 d = 0.04  # 4cm
 L = 25 * d
@@ -104,8 +107,11 @@ if mesh_comm.rank == model_rank:
     gmsh.model.mesh.optimize("Netgen")
     # gmsh.fltk.run()
 
+
 msh, _, ft = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=gdim)
 ft.name = "Facet markers"
+fdim = msh.topology.dim - 1
+# facet_tag = meshtags(msh, fdim, facet_indices[sorted_facets], facet_markers[sorted_facets])
 
 
 # Define boundary conditions
@@ -122,17 +128,20 @@ class InletVelocity():
 
 t = 0.
 T = 10.
-dt = 5e-4
+dt = 1e-3
 nt = int(T/dt)
 
-nu = Constant(msh, PETSc.ScalarType(1e-4))
+nu = Constant(msh, PETSc.ScalarType(1e-3))
 g = Constant(msh, PETSc.ScalarType(9.8))
-H = Constant(msh, PETSc.ScalarType(4 * d))
+H = Constant(msh, PETSc.ScalarType(0.16))
 
 # setup mixed function space
 v_cg2 = ufl.VectorElement("CG", msh.ufl_cell(), 2)
 s_cg1 = ufl.FiniteElement("CG", msh.ufl_cell(), 1)
 W = FunctionSpace(msh, v_cg2 * s_cg1)
+
+n = ufl.FacetNormal(msh)
+ds = ufl.Measure("ds", domain=msh, subdomain_data=ft)
 
 v, q = ufl.TestFunctions(W)
 du = Function(W)
@@ -142,19 +151,39 @@ du_prev = Function(W)
 u, h = ufl.split(du)
 u_prev, h_prev = ufl.split(du_prev)
 
-theta = 0.5
+# inflow BC
+V, _ = W.sub(0).collapse()
+Q, _ = W.sub(1).collapse()
+u_inlet = Function(V)
+u_inlet.interpolate(InletVelocity(0.))
+u_nonslip = Function(V)
+u_nonslip.x.array[:] = 0.
+
+theta = 1.
 u_mid = theta * u + (1 - theta) * u_prev
 h_mid = theta * h + (1 - theta) * h_prev
 F = (ufl.inner(u - u_prev, v) / dt * ufl.dx  # mass term u
-     + ufl.inner(h - h_prev, q) / dt * ufl.dx  # mass term h
      + ufl.inner(ufl.dot(u_mid, ufl.nabla_grad(u_mid)), v) * ufl.dx  # advection
-     + nu * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx  # dissipation
-     + g * ufl.inner(ufl.grad(h_mid), v) * ufl.dx)  # surface term
+     + nu * ufl.inner(ufl.grad(u_mid), ufl.grad(v)) * ufl.dx  # dissipation
+     + g * ufl.inner(ufl.grad(h_mid), v) * ufl.dx  # surface term
+     + ufl.inner(h - h_prev, q) / dt * ufl.dx  # mass term h
+     - ufl.inner((H + h) * u, ufl.grad(q)) * ufl.dx  # continuity term
+     + (H + h) * q * ufl.inner(u_inlet, n) * ds(2)  # inlet BC
+     + (H + h) * q * ufl.inner(u_inlet, n) * ds(3)  # outlet flather BC
+     + (H + h) * q * ufl.sqrt(g / H) * h_mid * ds(3))  # outlet flather BC
 
-problem = NonlinearProblem(F, du)
+bcu_inflow = dirichletbc(
+    u_inlet, locate_dofs_topological(W.sub(0), fdim, ft.find(inlet_marker)))
+
+bcu_obstacle = dirichletbc(
+    u_nonslip, locate_dofs_topological(W.sub(0), fdim, ft.find(obstacle_marker)))
+
+bcs = [bcu_inflow, bcu_obstacle]
+problem = NonlinearProblem(F, du, bcs=bcs)
 solver = NewtonSolver(mesh_comm, problem)
-solver.convergence_criterion = "incremental"
-solver.rtol = 1e-6
+solver.convergence_criterion = "residual"
+solver.rtol = 1e-3
+solver.report = True
 
 ksp = solver.krylov_solver
 opts = PETSc.Options()
@@ -163,6 +192,6 @@ opts[f"{option_prefix}ksp_type"] = "preonly"
 opts[f"{option_prefix}pc_type"] = "lu"
 ksp.setFromOptions()
 
-for i in range(nt):
+for i in tqdm(range(nt)):
     r = solver.solve(du)
     du_prev.x.array[:] = du.x.array
