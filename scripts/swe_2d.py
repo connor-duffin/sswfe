@@ -13,29 +13,11 @@ comm = fe.MPI.comm_world
 rank = comm.Get_rank()
 
 
-def stress_term(u, v, nu, nu_t, laplacian=False):
-    if laplacian:
-        return nu * fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
-    else:
-        return ((nu + nu_t) * fe.inner(fe.grad(u) + fe.grad(u).T, fe.grad(v)) * fe.dx
-                - (nu + nu_t) * (2. / 3.) * fe.inner(fe.div(u) * fe.Identity(2), fe.grad(v)) * fe.dx)
-
-
-def continuity_term(H, h, u, v, ibp=False):
-    if ibp:
-        return -fe.inner((H + h) * u, fe.grad(v)) * fe.dx
-    else:
-        return fe.inner(fe.div((H + h) * u), v) * fe.dx
-
-
 class ShallowTwo:
     def __init__(self, mesh, control):
         self.dt = control["dt"]
         self.theta = control["theta"]
         self.simulation = control["simulation"]
-        self.integrate_continuity_by_parts = control["integrate_continuity_by_parts"]
-        self.use_laplacian = control["laplacian"]
-        self.use_les = control["les"]
 
         if type(mesh) == str:
             # read mesh from file
@@ -87,64 +69,42 @@ class ShallowTwo:
         self.bcs = None
         self.solver = None
 
+    # TODO(connor): delete the BDF2 option + clean up bottom friction
     def setup_form(self, du, du_prev, du_prev_prev=None, bdf2=False):
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
-        C = fe.Constant(self.C)
         dt = fe.Constant(self.dt)
 
         u, h = fe.split(du)
         u_prev, h_prev = fe.split(du_prev)
 
-        if du_prev_prev is not None:
-            u_prev_prev, h_prev_prev = fe.split(du_prev_prev)
+        # C = fe.Constant(self.C)
+        # u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
 
-        u_mag = fe.sqrt(fe.dot(u_prev, u_prev))
+        if du_prev_prev is not None or bdf2:
+            logger.warning("BDF2 option is DEPRECATED and will be removed soon")
+            raise ValueError
 
         v_u, v_h = fe.TestFunctions(self.W)
-
         self.f_u = fe.Function(self.U_space)
         self.f_h = fe.Function(self.H_space)
 
-        if bdf2:
-            u_mid = u
-            h_mid = h
-            F = (3/2 * fe.inner(u - 4/3 * u_prev + 1/3 * u_prev_prev, v_u) / dt * fe.dx
-                 + 3/2 * fe.inner(h - 4/3 * h_prev + 1/3 * h_prev_prev, v_h) / dt * fe.dx
-                 + fe.inner(fe.dot(u, fe.nabla_grad(u)), v_u) * fe.dx  # advection
-                 + C * u_mag * fe.inner(u, v_u) / (self.H + h_prev) * fe.dx  # friction term
-                 + g * fe.inner(fe.grad(h), v_u) * fe.dx  # surface term
-                 - fe.inner(self.f_u, v_u) * fe.dx
-                 - fe.inner(self.f_h, v_h) * fe.dx)
-        else:
-            u_mid = self.theta * u + (1 - self.theta) * u_prev
-            h_mid = self.theta * h + (1 - self.theta) * h_prev
-            F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
-                 + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
-                 + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
-                 + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_prev) * fe.dx  # friction term
-                 + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
-                 - fe.inner(self.f_u, v_u) * fe.dx
-                 - fe.inner(self.f_h, v_h) * fe.dx)
-
-        # add in (parameterised) dissipation effects
-        if self.use_les:
-            self.les = LES(mesh=self.mesh, fs=self.H_space, u=u_mid, density=1.0, smagorinsky_coefficient=0.164)
-            nu_t = self.les.eddy_viscosity
-        else:
-            nu_t = 0.
-
-        dissipation = stress_term(u_mid, v_u, nu, nu_t=nu_t, laplacian=self.use_laplacian)
-        F += dissipation
-
-        # add in continuity term
-        F += continuity_term(self.H, h_mid, u_mid, v_h,
-                             self.integrate_continuity_by_parts)
-
+        # weak form for the system:
+        # continuity is integrated by parts;
+        # laplacian is used for dissipative effects (no LES)
+        u_mid = self.theta * u + (1 - self.theta) * u_prev
+        h_mid = self.theta * h + (1 - self.theta) * h_prev
+        F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
+             + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
+             + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
+             # + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_prev) * fe.dx  # bottom friction term
+             + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
+             + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
+             - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
+             - fe.inner(self.f_u, v_u) * fe.dx
+             - fe.inner(self.f_h, v_h) * fe.dx)
         J = fe.derivative(F, du)
-        return F, J
 
-    def setup_bcs(self, F):
         if self.simulation == "mms":
             self.u_exact = fe.Expression(
                 ("cos(x[0]) * sin(x[1])", "sin(pow(x[0], 2)) + cos(x[1])"),
@@ -159,57 +119,49 @@ class ShallowTwo:
             bcs = [bc_u, bc_h]
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
-            # set inflow, outflow, walls all via Dirichlet BC's
+            # inflow: fixed, u:= (0.535, 0)
+            # outflow: flather, u := u_in + sqrt(g / H) * h
+            # walls: no-normal flow, dot(u, n) = 0
+            # obstacle: no-slip, u:= (0, 0)
+            # set inflow via Dirichlet BC's
             u_in = fe.Constant((0.535, 0.))
-            u_out = u_in
             no_slip = fe.Constant((0., 0.))
 
             inflow = "near(x[0], 0)"
-            outflow = "near(x[0], 1)"
-            walls = "near(x[1], 0) || near(x[1], 0.56)"
-
             bcu_inflow = fe.DirichletBC(self.W.sub(0), u_in, inflow)
-            bcu_outflow = fe.DirichletBC(self.W.sub(0), u_out, outflow)
-            bcu_walls = fe.DirichletBC(self.W.sub(0), no_slip, walls)
-            bcs = [bcu_inflow, bcu_outflow, bcu_walls]
+            bcs = [bcu_inflow]
 
-            # need to include surface integrals if we integrate by parts
-            # only left and right boundaries matter, as the rest are zero (no-slip condition)
-            if self.integrate_continuity_by_parts:
-                class LeftBoundary(fe.SubDomain):
-                    def inside(self, x, on_boundary):
-                        tol = 1E-14  # tolerance for coordinate comparisons
-                        return on_boundary and abs(x[0] - 0.) < tol
-
-                class RightBoundary(fe.SubDomain):
-                    def inside(self, x, on_boundary):
-                        tol = 1E-14  # tolerance for coordinate comparisons
-                        return on_boundary and abs(x[0] - 1.) < tol
-
-                Gamma_left = LeftBoundary()
-                Gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
-                Gamma_right = RightBoundary()
-                Gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
-
-                v_u, v_h = fe.TestFunctions(self.W)
-                u_prev, h_prev = fe.split(self.du_prev)
-
-                n = fe.FacetNormal(self.mesh)
-                ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
-                F += (
-                    (self.H + h_prev) * fe.inner(u_prev, n) * v_h * ds(1)  # LHS set via Dirichlet's
-                    + (self.H + h_prev) * fe.inner(u_prev, n) * v_h * ds(2)  # RHS also set via Dirichlet's
-                    + 0.  # all other conditions have no-normal/zero flow
-                )
-
-            # TODO: take in cylinder mesh parameterisations as an argument/option
-            # 0.925 is the centre of the domain
+            # TODO: option for cylinder mesh
             if self.simulation == "cylinder":
                 cylinder = "on_boundary && x[0] >= 0.18 && x[0] <= 0.22 && x[1] >= 0.26 && x[1] <= 0.3"
-                bcs.append(
-                    fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
+                bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
-        return bcs, F
+            # need to include surface integrals as we integrate by parts
+            # only left and right boundaries matter;
+            # the rest are zero (no-slip OR no-normal flow)
+            class LeftBoundary(fe.SubDomain):
+                def inside(self, x, on_boundary):
+                    tol = 1E-14  # tolerance for coordinate comparisons
+                    return on_boundary and abs(x[0] - 0.) < tol
+
+            class RightBoundary(fe.SubDomain):
+                def inside(self, x, on_boundary):
+                    tol = 1E-14  # tolerance for coordinate comparisons
+                    return on_boundary and abs(x[0] - 1.) < tol
+
+            Gamma_left = LeftBoundary()
+            Gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
+            Gamma_right = RightBoundary()
+            Gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
+
+            n = fe.FacetNormal(self.mesh)
+            ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
+            F += ((self.H + h_prev) * fe.inner(u_in, n) * v_h * ds(1)  # inflow
+                  + (self.H + h_prev) * fe.inner(u_in, n) * v_h * ds(2)  # flather
+                  + (self.H + h_prev) * fe.sqrt(9.8 / self.H) * h_mid * v_h * ds(2)  # flather
+                  + 0.)  # all other conditions have no-normal/zero flow
+
+        return F, J, bcs
 
     def setup_solver(self, F, du, bcs, J):
         problem = fe.NonlinearVariationalProblem(F, du, bcs=bcs, J=J)
@@ -227,8 +179,17 @@ class ShallowTwo:
         prm["nonlinear_solver"] = "snes"
         prm["snes_solver"]["line_search"] = "bt"
         prm["snes_solver"]["linear_solver"] = "gmres"
-        # prm["snes_solver"]["linear_solver"] = "mumps"
         prm["snes_solver"]["preconditioner"] = "jacobi"
+        # prm["snes_solver"]["preconditioner"] = "fieldsplit"
+
+        # prm["snes_solver"]["linear_solver"] = "mumps"
+        # prm["snes_solver"]["krylov_solver"]["pc_fieldsplit_type"] = "schur"
+        # prm["snes_solver"]["krylov_solver"]["pc_fieldsplit_schur_fact_type"] = "FULL"
+        # prm["snes_solver"]["krylov_solver"]["fieldsplit_0_ksp_type"] = "preonly"
+        # prm["snes_solver"]["krylov_solver"]["fieldsplit_1_ksp_type"] = "preonly"
+        # prm["snes_solver"]["krylov_solver"]["fieldsplit_0_pc_type"] = "ilu"
+        # prm["snes_solver"]["krylov_solver"]["fieldsplit_1_pc_type"] = "ilu"
+
         logger.info(f"using {prm['snes_solver']['linear_solver']} solver with {prm['snes_solver']['preconditioner']} PC")
 
         # solver convergence
@@ -247,17 +208,14 @@ class ShallowTwo:
 
         return solver
 
-    def solve(self, bdf2):
-        # set the LES parameter
-        if self.use_les:
-            self.les.solve()
-
+    def solve(self, bdf2=False):
         # solve at current time
         self.solver.solve()
 
         # set previous timesteps appropriately
         if bdf2:
-            fe.assign(self.du_prev_prev, self.du_prev)
+            logger.warning("BDF2 option is DEPRECATED and will be removed soon")
+            raise ValueError
 
         fe.assign(self.du_prev, self.du)
 
