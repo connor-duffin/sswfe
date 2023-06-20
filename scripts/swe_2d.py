@@ -179,16 +179,17 @@ class ShallowTwo:
         prm["nonlinear_solver"] = "snes"
         prm["snes_solver"]["line_search"] = "bt"
         prm["snes_solver"]["linear_solver"] = "gmres"
-        prm["snes_solver"]["preconditioner"] = "jacobi"
-        # prm["snes_solver"]["preconditioner"] = "fieldsplit"
 
-        # prm["snes_solver"]["linear_solver"] = "mumps"
-        # prm["snes_solver"]["krylov_solver"]["pc_fieldsplit_type"] = "schur"
-        # prm["snes_solver"]["krylov_solver"]["pc_fieldsplit_schur_fact_type"] = "FULL"
-        # prm["snes_solver"]["krylov_solver"]["fieldsplit_0_ksp_type"] = "preonly"
-        # prm["snes_solver"]["krylov_solver"]["fieldsplit_1_ksp_type"] = "preonly"
-        # prm["snes_solver"]["krylov_solver"]["fieldsplit_0_pc_type"] = "ilu"
-        # prm["snes_solver"]["krylov_solver"]["fieldsplit_1_pc_type"] = "ilu"
+        # prm["snes_solver"]["preconditioner"] = "jacobi"
+        prm["snes_solver"]["preconditioner"] = "fieldsplit"
+
+        # fieldsplit options from firedrake-fluids
+        fe.PETScOptions.set("pc_fieldsplit_type", "schur")
+        fe.PETScOptions.set("pc_fieldsplit_schur_fact_type", "FULL")
+        fe.PETScOptions.set("fieldsplit_0_ksp_type", "preonly")
+        fe.PETScOptions.set("fieldsplit_1_ksp_type", "preonly")
+        fe.PETScOptions.set("fieldsplit_0_pc_type", "ilu")
+        fe.PETScOptions.set("fieldsplit_1_pc_type", "ilu")
 
         logger.info(f"using {prm['snes_solver']['linear_solver']} solver with {prm['snes_solver']['preconditioner']} PC")
 
