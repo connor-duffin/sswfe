@@ -13,7 +13,7 @@ cm = 1e-2
 # domain_width = 0.41
 # domain_length = 2.2
 domain_width = 1.85
-domain_length = 5.2
+domain_length = 5.46
 
 # cylinder setup
 cyl_diameter = 0.1
