@@ -10,7 +10,9 @@ args = parser.parse_args()
 d = 0.04
 domain_width = 14 * d
 domain_length = 25 * d
-h = d / 4  # 1cm resolution
+# coarse: d / 4 = 1cm resolution
+# refined: d / 10 = 0.4cm resolution
+h = d / 10
 
 gmsh.initialize()
 gmsh.model.add("channel")

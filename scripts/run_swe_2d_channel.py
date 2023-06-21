@@ -41,7 +41,7 @@ def evaluate_function(u, x, mesh):
     return computed_u
 
 
-mesh_file = "mesh/swe-square-cylinder-test.xdmf"
+mesh_file = "mesh/swe-square-cylinder-test-refined.xdmf"
 simulation = "cylinder"
 control = {"dt": 5e-4,
            "theta": 1,
@@ -65,7 +65,7 @@ n_eval = 100
 nt_thin = len([i for i in range(nt) if i % thin == 0])
 x_eval = [[x, 7 * 0.04] for x in np.linspace(6 * 0.04, 1, num=n_eval)]
 
-swe.setup_checkpoint("outputs/swe-lyn-rodi-coarse.h5")
+swe.setup_checkpoint("outputs/swe-lyn-rodi-refined.h5")
 swe.checkpoint.write(swe.mesh, "mesh")
 t_out = np.zeros((nt_thin, ))
 u_streamline_out = np.zeros((nt_thin, n_eval))
@@ -99,4 +99,4 @@ if swe.mesh.mpi_comm().rank == 0:
             np.mean(u_streamline_out / 0.535, axis=0))
     ax.set_xlabel(r"$x / d$")
     ax.set_ylabel(r"$u / U$")
-    plt.savefig("figures/test-velocity.pdf")
+    plt.savefig("figures/test-velocity-refined.pdf")

@@ -30,12 +30,13 @@ class ShallowTwo:
             self.mesh = mesh
 
         logger.info(f"mesh has {self.mesh.num_cells()} elements")
-        self.dx = self.mesh.hmax()
+        self.dx = self.mesh.hmin()
         self.x = fe.SpatialCoordinate(self.mesh)
         self.x_coords = self.mesh.coordinates()
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 
+        logger.info("CFL number is %f", self.dx / self.dt)
         # use P2-P1 elements only
         U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
         H = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
