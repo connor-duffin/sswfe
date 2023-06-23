@@ -14,7 +14,7 @@ rank = comm.Get_rank()
 
 
 class ShallowTwo:
-    def __init__(self, mesh, control):
+    def __init__(self, mesh, params, control):
         self.dt = control["dt"]
         self.theta = control["theta"]
         self.simulation = control["simulation"]
@@ -36,7 +36,8 @@ class ShallowTwo:
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 
-        logger.info("CFL number is %f", self.dx / self.dt)
+        logger.info("CFL number is %f", 0.04 * self.dt / self.dx)
+
         # use P2-P1 elements only
         U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
         H = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
@@ -50,19 +51,14 @@ class ShallowTwo:
 
         self.du = fe.Function(W)
         self.du_prev = fe.Function(W)
-        self.du_prev_prev = fe.Function(W)
 
         # storage for later
         self.du_vertices = np.copy(self.du.compute_vertex_values())
 
-        if self.simulation == "mms":
-            self.nu = 0.6
-            self.C = 0.0025
-            self.H = 50.
-        elif self.simulation in ["cylinder", "laminar"]:
-            self.nu = 1e-4
-            self.C = 0.
-            self.H = 0.16
+        # set parameters etc
+        self.nu = params["nu"]
+        self.C = params["C"]
+        self.H = params["H"]
 
         # initialise solution objects
         self.F = None
@@ -70,21 +66,17 @@ class ShallowTwo:
         self.bcs = None
         self.solver = None
 
-    # TODO(connor): delete the BDF2 option + clean up bottom friction
-    def setup_form(self, du, du_prev, du_prev_prev=None, bdf2=False):
+    def setup_form(self, du, du_prev):
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
         dt = fe.Constant(self.dt)
+        C = fe.Constant(self.C)
 
         u, h = fe.split(du)
         u_prev, h_prev = fe.split(du_prev)
 
-        # C = fe.Constant(self.C)
-        # u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
-
-        if du_prev_prev is not None or bdf2:
-            logger.warning("BDF2 option is DEPRECATED and will be removed soon")
-            raise ValueError
+        # check for bottom drag
+        u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
 
         v_u, v_h = fe.TestFunctions(self.W)
         self.f_u = fe.Function(self.U_space)
@@ -98,13 +90,11 @@ class ShallowTwo:
         F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
              + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
              + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
-             # + C * u_mag * fe.inner(u_mid, v_u) / (self.H + h_prev) * fe.dx  # bottom friction term
              + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
              + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
              - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
              - fe.inner(self.f_u, v_u) * fe.dx
              - fe.inner(self.f_h, v_h) * fe.dx)
-        J = fe.derivative(F, du)
 
         if self.simulation == "mms":
             self.u_exact = fe.Expression(
@@ -120,21 +110,27 @@ class ShallowTwo:
             bcs = [bc_u, bc_h]
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
-            # inflow: fixed, u:= (0.535, 0)
+            # inflow: fixed, u:= u_in
             # outflow: flather, u := u_in + sqrt(g / H) * h
             # walls: no-normal flow, dot(u, n) = 0
             # obstacle: no-slip, u:= (0, 0)
             # set inflow via Dirichlet BC's
-            u_in = fe.Constant((0.535, 0.))
+            self.u_in = fe.Function(self.U_space)
+            self.inlet_velocity = fe.Expression(
+                ("0.04 * sin(2 * pi * t / 60)", "0.0"), pi=np.pi, t=0., degree=4)
+            self.inlet_velocity.t = 0.
+            self.u_in.interpolate(self.inlet_velocity)
             no_slip = fe.Constant((0., 0.))
 
             inflow = "near(x[0], 0)"
-            bcu_inflow = fe.DirichletBC(self.W.sub(0), u_in, inflow)
+            bcu_inflow = fe.DirichletBC(self.W.sub(0), self.u_in, inflow)
             bcs = [bcu_inflow]
 
             # TODO: option for cylinder mesh
             if self.simulation == "cylinder":
-                cylinder = "on_boundary && x[0] >= 0.18 && x[0] <= 0.22 && x[1] >= 0.26 && x[1] <= 0.3"
+                # cylinder = "on_boundary && x[0] >= 0.18 && x[0] <= 0.22 && x[1] >= 0.26 && x[1] <= 0.3"
+                cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 "
+                            + "&& x[1] >= 0.45 && x[1] <= 0.55")
                 bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
             # need to include surface integrals as we integrate by parts
@@ -142,26 +138,27 @@ class ShallowTwo:
             # the rest are zero (no-slip OR no-normal flow)
             class LeftBoundary(fe.SubDomain):
                 def inside(self, x, on_boundary):
-                    tol = 1E-14  # tolerance for coordinate comparisons
+                    tol = 1e-14
                     return on_boundary and abs(x[0] - 0.) < tol
 
             class RightBoundary(fe.SubDomain):
                 def inside(self, x, on_boundary):
-                    tol = 1E-14  # tolerance for coordinate comparisons
-                    return on_boundary and abs(x[0] - 1.) < tol
+                    tol = 1e-14
+                    return on_boundary and abs(x[0] - 2.) < tol
 
-            Gamma_left = LeftBoundary()
-            Gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
-            Gamma_right = RightBoundary()
-            Gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
+            gamma_left = LeftBoundary()
+            gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
+            gamma_right = RightBoundary()
+            gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
 
+            # all other conditions are just no-normal/no-slip
             n = fe.FacetNormal(self.mesh)
             ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
-            F += ((self.H + h_prev) * fe.inner(u_in, n) * v_h * ds(1)  # inflow
-                  + (self.H + h_prev) * fe.inner(u_in, n) * v_h * ds(2)  # flather
-                  + (self.H + h_prev) * fe.sqrt(9.8 / self.H) * h_mid * v_h * ds(2)  # flather
-                  + 0.)  # all other conditions have no-normal/zero flow
+            F += ((self.H + h_mid) * fe.inner(u_mid, n) * v_h * ds(1)  # inflow
+                  + (self.H + h_mid) * fe.inner(self.u_in, n) * v_h * ds(2)  # flather
+                  + (self.H + h_mid) * fe.sqrt(g / self.H) * h_mid * v_h * ds(2))  # flather
 
+        J = fe.derivative(F, du, fe.TrialFunction(self.W))
         return F, J, bcs
 
     def setup_solver(self, F, du, bcs, J):
@@ -170,21 +167,27 @@ class ShallowTwo:
 
         # vanilla fenics solver options
         prm = solver.parameters
-        # prm['newton_solver']['absolute_tolerance'] = 1E-8
-        # prm['newton_solver']['relative_tolerance'] = 1E-6
+        # prm['newton_solver']['absolute_tolerance'] = 1e-8
+        # prm['newton_solver']['relative_tolerance'] = 1e-6
         # prm['newton_solver']['convergence_criterion'] = "incremental"
         # prm['newton_solver']['maximum_iterations'] = 50
         # prm['newton_solver']['relaxation_parameter'] = 0.5
 
         # PETSc SNES config
-        prm["nonlinear_solver"] = "snes"
-        prm["snes_solver"]["line_search"] = "bt"
-        prm["snes_solver"]["linear_solver"] = "gmres"
+        prm["nonlinear_solver"] = "newton"
+        # prm["snes_solver"]["line_search"] = "bt"
 
-        # prm["snes_solver"]["preconditioner"] = "jacobi"
-        prm["snes_solver"]["preconditioner"] = "fieldsplit"
+        # direct solver: MUMPS
+        prm["snes_solver"]["linear_solver"] = "mumps"
+
+        # iterative solver options
+        # prm["snes_solver"]["linear_solver"] = "gmres"
+        # # prm["snes_solver"]["preconditioner"] = "jacobi"
+        # prm["snes_solver"]["preconditioner"] = "fieldsplit"
 
         # fieldsplit options from firedrake-fluids
+        fe.PETScOptions.set("snes_linesearch_monitor")
+        fe.PETScOptions.set("snes_stol", 0)
         fe.PETScOptions.set("pc_fieldsplit_type", "schur")
         fe.PETScOptions.set("pc_fieldsplit_schur_fact_type", "FULL")
         fe.PETScOptions.set("fieldsplit_0_ksp_type", "preonly")
@@ -197,7 +200,7 @@ class ShallowTwo:
         # solver convergence
         prm["snes_solver"]["relative_tolerance"] = 1e-5
         prm["snes_solver"]['absolute_tolerance'] = 1e-5
-        prm["snes_solver"]["maximum_iterations"] = 50
+        prm["snes_solver"]["maximum_iterations"] = 100
         prm["snes_solver"]['error_on_nonconvergence'] = True
         prm["snes_solver"]['krylov_solver']['nonzero_initial_guess'] = True
 

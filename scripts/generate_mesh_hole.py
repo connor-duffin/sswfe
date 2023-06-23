@@ -12,8 +12,8 @@ args = parser.parse_args()
 cm = 1e-2
 # domain_width = 0.41
 # domain_length = 2.2
-domain_width = 1.85
-domain_length = 5.46
+domain_width = 1.
+domain_length = 2.
 
 # cylinder setup
 cyl_diameter = 0.1
@@ -22,7 +22,7 @@ cyl_center = [domain_length / 2, domain_width / 2]
 
 gmsh.initialize()
 gmsh.model.add("channel")
-h = 5 * cm
+h = 4 * cm
 
 factory = gmsh.model.occ
 factory.addPoint(0., 0., 0, h, 1)
@@ -66,7 +66,10 @@ gmsh.model.addPhysicalGroup(2, [1], name="Surface")
 if args.add_cylinder:
     gmsh.model.addPhysicalGroup(1, [9, 10], name="Cylinder")
 
+gmsh.option.setNumber("Mesh.Algorithm", 8)
 gmsh.model.mesh.generate(2)
+gmsh.model.mesh.optimize("Netgen")
+gmsh.model.mesh.refine()
 
 gmsh.write(args.output_file)
 
