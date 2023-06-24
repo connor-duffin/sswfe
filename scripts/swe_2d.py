@@ -33,6 +33,11 @@ class ShallowTwo:
         self.dx = self.mesh.hmin()
         self.x = fe.SpatialCoordinate(self.mesh)
         self.x_coords = self.mesh.coordinates()
+
+        assert np.all(self.x_coords >= 0.)
+        self.L = np.amax(self.x_coords[:, 0])
+        self.B = np.amax(self.x_coords[:, 1])
+
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 

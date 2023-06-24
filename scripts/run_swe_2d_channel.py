@@ -42,8 +42,8 @@ def evaluate_function(u, x, mesh):
 
 
 mesh_file = "mesh/branson.xdmf"
-output_file = "outputs/branson-swe.h5"
-params = dict(nu=1e-4, H=0.053, C=0.)
+output_file = "outputs/branson-swe-high-re.h5"
+params = dict(nu=5e-5, H=0.053, C=0.)
 control = {"dt": 1e-2,
            "theta": 0.51,
            "simulation": "cylinder",

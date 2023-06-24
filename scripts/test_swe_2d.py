@@ -31,6 +31,9 @@ def test_shallowtwo_init():
                "les": False}
     swe = ShallowTwo(mesh, params, control)
 
+    assert swe.L == 1.
+    assert swe.B == 1.
+
     assert swe.nu == 0.6
     assert swe.C == 0.0025
     assert swe.H == 50.
@@ -81,15 +84,17 @@ def test_shallowtwo_ss(swe_2d):
 
 def test_shallowtwo_jac_bc(swe_2d):
     mesh = fe.RectangleMesh(fe.Point(0., 0.),
-                            fe.Point(5.46, 1.85), 32, 16)
-    params = {"nu": 0.6, "C": 0.0025, "H": 50.}
+                            fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05}
     control = {"dt": 0.01,
-               "theta": 1.,
-               "simulation": "cylinder",
+               "theta": 0.51,
+               "simulation": "laminar",
                "integrate_continuity_by_parts": False,
                "laplacian": True,
                "les": False}
     swe_2d = ShallowTwo(mesh, params, control)
+    assert swe_2d.L == 2.
+    assert swe_2d.B == 1.
 
     F, J, bcs = swe_2d.setup_form(swe_2d.du, swe_2d.du_prev)
     solver = swe_2d.setup_solver(F, swe_2d.du, bcs, J)
@@ -103,8 +108,19 @@ def test_shallowtwo_jac_bc(swe_2d):
 
         fe.assign(swe_2d.du_prev, swe_2d.du)
 
+    # check integration along the boundaries is sensible
     n = fe.FacetNormal(swe_2d.mesh)
     ds = fe.Measure('ds', domain=swe_2d.mesh, subdomain_data=swe_2d.boundaries)
+
+    h_test = fe.Function(swe_2d.H_space)
+    h_test.interpolate(fe.Expression("cos(x[0]) * sin(x[1])", degree=4))
+    assert np.abs(fe.assemble(h_test * ds(1)) - 0.4596976941318603) / np.abs(0.4596976941318603) <= 1e-3
+    assert np.abs(fe.assemble(h_test * ds(2)) - (-0.1913017411809895)) / np.abs(-0.1913017411809895) <= 1e-3
+
+    u_test = fe.Function(swe_2d.U_space)
+    u_test.interpolate(fe.Expression(("1.0", "0.0"), degree=4))
+    assert np.abs(fe.assemble(fe.inner(u_test, n) * ds(1)) + 1.) <= 1e-8
+    assert np.abs(fe.assemble(fe.inner(u_test, n) * ds(2)) - 1.) <= 1e-8
 
 
 def test_shallowtwo_save(swe_2d):
