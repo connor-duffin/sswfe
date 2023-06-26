@@ -2,8 +2,8 @@ import logging
 
 import fenics as fe
 import numpy as np
-import matplotlib.pyplot as plt
 
+from argparse import ArgumentParser
 from swe_2d import ShallowTwo
 from tqdm import tqdm
 
@@ -12,46 +12,18 @@ logging.basicConfig(
     level=logging.INFO)
 
 
-def evaluate_function(u, x, mesh):
-    comm = u.function_space().mesh().mpi_comm()
-    if comm.size == 1:
-        return u(*x)
+parser = ArgumentParser()
+parser.add_argument("mesh_file", type=str)
+parser.add_argument("output_file", type=str)
+args = parser.parse_args()
 
-    # Find whether the point lies on the partition of the mesh local
-    # to this process, and evaulate u(x)
-    cell, distance = mesh.bounding_box_tree().compute_closest_entity(fe.Point(*x))
-    u_eval = u(*x) if distance < 1e-14 else None
+# mesh_file = "mesh/branson.xdmf"
+# output_file = "outputs/branson-swe-high-re.h5"
+params = dict(nu=1e-4, H=0.053, C=2.5e-3)
+control = dict(dt=1e-2, theta=0.5, simulation="cylinder",
+               laplacian=True, les=False, integrate_continuity_by_parts=True)
 
-    # Gather the results on process 0
-    comm = mesh.mpi_comm()
-    computed_u = comm.gather(u_eval, root=0)
-
-    # Verify the results on process 0 to ensure we see the same value
-    # on a process boundary
-    if comm.rank == 0:
-        global_u_evals = np.array([y for y in computed_u if y is not None], dtype=np.double)
-        assert np.all(np.abs(global_u_evals[0] - global_u_evals) < 1e-9)
-        computed_u = global_u_evals[0]
-    else:
-        computed_u = None
-
-    # broadcast the verified result to all processes
-    computed_u = comm.bcast(computed_u, root=0)
-
-    return computed_u
-
-
-mesh_file = "mesh/branson.xdmf"
-output_file = "outputs/branson-swe-high-re.h5"
-params = dict(nu=5e-5, H=0.053, C=0.)
-control = {"dt": 1e-2,
-           "theta": 0.51,
-           "simulation": "cylinder",
-           "laplacian": True,
-           "les": False,
-           "integrate_continuity_by_parts": True}
-
-swe = ShallowTwo(mesh=mesh_file, params=params, control=control)
+swe = ShallowTwo(mesh=args.mesh_file, params=params, control=control)
 F, J, bcs = swe.setup_form(swe.du, swe.du_prev)
 swe.solver = swe.setup_solver(F, swe.du, bcs, J)
 n_dofs = len(swe.du.vector().get_local())
@@ -64,7 +36,7 @@ write_checkpoint = True
 load_from_checkpoint = False
 
 if load_from_checkpoint:
-    with fe.HDF5File(swe.mesh.mpi_comm(), output_file, "r") as checkpoint_file:
+    with fe.HDF5File(swe.mesh.mpi_comm(), args.output_file, "r") as checkpoint_file:
         i = 0
         while checkpoint_file.has_dataset(f"/du/vector_{i}"):
             i += 1
@@ -86,8 +58,8 @@ logging.info(
 
 # append to output_file
 if write_checkpoint:
-    logging.info(f"Writing checkpoint to disk at {output_file}")
-    swe.setup_checkpoint(output_file)
+    logging.info(f"Writing checkpoint to disk at {args.output_file}")
+    swe.setup_checkpoint(args.output_file)
     swe.checkpoint.write(swe.mesh, "mesh")
 
 t_out = np.zeros((nt_thin, ))

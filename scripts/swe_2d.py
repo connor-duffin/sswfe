@@ -3,7 +3,12 @@ import logging
 
 import numpy as np
 import fenics as fe
-from swe_les import LES
+
+from scipy.linalg import cholesky, cho_factor, cho_solve
+from statfenics.covariance import (sq_exp_covariance,
+                                   sq_exp_evd_hilbert,
+                                   sq_exp_evd)
+from statfenics.utils import dolfin_to_csr
 
 # initialise the logger
 logger = logging.getLogger(__name__)
@@ -41,13 +46,15 @@ class ShallowTwo:
         self.boundaries = fe.MeshFunction("size_t", self.mesh,
                                           self.mesh.topology().dim() - 1, 0)
 
-        logger.info("CFL number is %f", 0.04 * self.dt / self.dx)
-
         # use P2-P1 elements only
         U = fe.VectorElement("P", self.mesh.ufl_cell(), 2)
         H = fe.FiniteElement("P", self.mesh.ufl_cell(), 1)
         TH = fe.MixedElement([U, H])
         W = self.W = fe.FunctionSpace(self.mesh, TH)
+
+        # get dof labels for each
+        self.u_dofs = self.W.sub(0).dofmap().dofs()
+        self.h_dofs = self.W.sub(1).dofmap().dofs()
 
         # split up function spaces for later interpolation
         self.U, self.H = W.split()
@@ -95,8 +102,9 @@ class ShallowTwo:
         F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
              + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
              + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
-             + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
+             + C * (u_mag / (self.H + h_mid)) * fe.inner(u_mid, v_u) * fe.dx  # bottom friction
              + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
+             + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
              - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
              - fe.inner(self.f_u, v_u) * fe.dx
              - fe.inner(self.f_h, v_h) * fe.dx)
@@ -120,6 +128,7 @@ class ShallowTwo:
             # walls: no-normal flow, dot(u, n) = 0
             # obstacle: no-slip, u:= (0, 0)
             # set inflow via Dirichlet BC's
+            logger.info("CFL number is %f", 0.04 * self.dt / self.dx)
             self.u_in = fe.Function(self.U_space)
             self.inlet_velocity = fe.Expression(
                 ("0.04 * sin(2 * pi * t / 60)", "0.0"), pi=np.pi, t=0., degree=4)
@@ -261,3 +270,100 @@ class ShallowTwo:
 
     def checkpoint_close(self):
         self.checkpoint.close()
+
+
+class ShallowTwoFilter(ShallowTwo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup_filter(self, stat_params):
+        u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
+        M = fe.assemble(fe.inner(u, v) * fe.dx)
+        M_scipy = dolfin_to_csr(M)
+
+        self.mean = np.copy(self.du.vector().get_local())
+        self.k_init_u = stat_params["k_init_u"]
+        self.k_init_h = stat_params["k_init_h"]
+        self.k = stat_params["k"]
+
+        # matrix inits
+        self.cov_sqrt = np.zeros((self.mean.shape[0], self.k))
+        self.cov_sqrt_prev = np.zeros((self.mean.shape[0], self.k))
+        self.cov_sqrt_pred = np.zeros((self.mean.shape[0],
+                                       self.k + self.k_init_u + self.k_init_h))
+        self.G_sqrt = np.zeros((self.mean.shape[0],
+                                self.k_init_u + self.k_init_h))
+
+        if stat_params["rho_u"] > 0.:
+            self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
+                self.U_space, self.k_init_u,
+                stat_params["rho_u"],
+                stat_params["ell_u"])
+
+            self.G_sqrt[self.u_dofs, 0:len(self.Ku_vals)] = (
+                Ku_vecs @ np.diag(np.sqrt(self.Ku_vals)))
+            print(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+
+        if stat_params["rho_h"] > 0.:
+            self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
+                self.H_space, self.k_init_h,
+                stat_params["rho_h"],
+                stat_params["ell_h"])
+            self.G_sqrt[self.h_dofs, self.k_init_u:(self.k_init_u + len(self.Kh_vals))] = (
+                Kh_vecs @ np.diag(np.sqrt(self.Kh_vals)))
+            print(f"Spectral diff (h): {self.Kh_vals[-1]:.4e}, {self.Kh_vals[0]:.4e}")
+
+        # multiplication *after* the initial construction
+        self.G_sqrt[:] = M_scipy @ self.G_sqrt
+
+    def prediction_step(self, t):
+        raise NotImplementedError
+
+    def compute_lml(self, y, H, sigma_y):
+        self.mean[:] = self.du.vector().get_local()
+        mean_obs = H @ self.mean
+        n_obs = len(mean_obs)
+
+        HL = H @ self.cov_sqrt
+        cov_obs = HL @ HL.T
+        cov_obs[np.diag_indices_from(cov_obs)] += sigma_y**2 + 1e-10
+        S_chol = cho_factor(cov_obs, lower=True)
+        S_inv_y = cho_solve(S_chol, y - mean_obs)
+        log_det = 2 * np.sum(np.log(np.diag(S_chol[0])))
+
+        return (- S_inv_y @ S_inv_y / 2
+                - log_det / 2
+                - n_obs * np.log(2 * np.pi) / 2)
+
+    def update_step(self, y, H, sigma_y, return_correction=False):
+        self.mean[:] = self.du.vector().get_local()
+        mean_obs = H @ self.mean
+
+        HL = H @ self.cov_sqrt
+        cov_obs = HL @ HL.T
+        cov_obs[np.diag_indices_from(cov_obs)] += sigma_y**2 + 1e-10
+        S_chol = cho_factor(cov_obs, lower=True)
+        S_inv_y = cho_solve(S_chol, y - mean_obs)
+
+        # kalman updates: for high-dimensions this is the bottleneck
+        # TODO(connor): avoid re-allocation and poor memory management
+        HL = H @ self.cov_sqrt
+        S_inv_HL = cho_solve(S_chol, HL)
+
+        correction = self.cov_sqrt @ HL.T @ S_inv_y
+        self.mean += correction
+        R = cholesky(np.eye(HL.shape[1]) - HL.T @ S_inv_HL, lower=True)
+        self.cov_sqrt[:] = self.cov_sqrt @ R
+
+        # update fenics state vector
+        self.du.vector().set_local(self.mean.copy())
+
+        if return_correction:
+            return correction
+
+    def set_prev(self):
+        fe.assign(self.du_prev, self.du)
+        if self.lr:
+            self.cov_sqrt_prev[:] = self.cov_sqrt
+        else:
+            self.cov_prev[:] = self.cov

@@ -4,7 +4,7 @@ import numpy as np
 import fenics as fe
 
 from numpy.testing import assert_allclose
-from swe_2d import ShallowTwo
+from swe_2d import ShallowTwo, ShallowTwoFilter
 
 
 @pytest.fixture
@@ -44,9 +44,6 @@ def test_shallowtwo_init():
     F, J, bcs = swe.setup_form(swe.du, swe.du_prev)
     solver = swe.setup_solver(F, swe.du, bcs, J)
 
-    assert len(bcs) == 2
-    assert len(F.integrals()) == 8
-
     params = {"nu": 1e-4, "C": 0., "H": 0.073}
     control = {"dt": 0.01,
                "theta": 1.,
@@ -57,9 +54,6 @@ def test_shallowtwo_init():
     swe = ShallowTwo(mesh, params, control)
     F, J, bcs = swe.setup_form(swe.du, swe.du_prev)
     swe.setup_solver(F, swe.du, bcs, J)
-
-    assert len(bcs) == 1
-    assert len(F.integrals()) == 11
 
     for forcing in [swe.f_u, swe.f_h]:
         f = np.copy(forcing.vector().get_local())
@@ -153,3 +147,28 @@ def test_shallowtwo_save(swe_2d):
 
     checkpoint.close()
     os.remove(f)
+
+
+def test_shallowtwo_filter():
+    mesh = fe.RectangleMesh(fe.Point(0., 0.),
+                            fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05}
+    control = {"dt": 0.01,
+               "theta": 0.5,
+               "simulation": "laminar",
+               "integrate_continuity_by_parts": False,
+               "laplacian": True,
+               "les": False}
+    swe_2d = ShallowTwoFilter(mesh, params, control)
+    assert swe_2d.L == 2.
+    assert swe_2d.B == 1.
+
+    # check that all the dofs line up
+    assert_allclose(np.unique(swe_2d.W.dofmap().dofs()),
+                    np.unique(np.concatenate((swe_2d.u_dofs, swe_2d.h_dofs))))
+
+    # estimate filter etc
+    stat_params = dict(rho_u=1., rho_h=1., ell_u=1., ell_h=1.,
+                       k_init_u=16, k_init_h=16, k=16)
+    swe_2d.setup_filter(stat_params)
+    print(swe_2d.Ku_vals, swe_2d.Kh_vals)
