@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("output_file", type=str)
 parser.add_argument("--add_cylinder", action="store_true")
+parser.add_argument("--refine", action="store_true")
 parser.add_argument("--popup", action="store_true")
 args = parser.parse_args()
 
@@ -22,7 +23,7 @@ cyl_center = [domain_length / 2, domain_width / 2]
 
 gmsh.initialize()
 gmsh.model.add("channel")
-h = 4 * cm
+h = cyl_diameter / 8
 
 factory = gmsh.model.occ
 factory.addPoint(0., 0., 0, h, 1)
@@ -69,7 +70,10 @@ if args.add_cylinder:
 gmsh.option.setNumber("Mesh.Algorithm", 8)
 gmsh.model.mesh.generate(2)
 gmsh.model.mesh.optimize("Netgen")
-gmsh.model.mesh.refine()
+
+if args.refine:
+    gmsh.model.mesh.refine()
+    gmsh.model.mesh.optimize("Netgen")
 
 gmsh.write(args.output_file)
 
