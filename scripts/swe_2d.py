@@ -9,6 +9,7 @@ from statfenics.covariance import (sq_exp_covariance,
                                    sq_exp_evd_hilbert,
                                    sq_exp_evd)
 from statfenics.utils import dolfin_to_csr
+from swe_les import LES
 
 # initialise the logger
 logger = logging.getLogger(__name__)
@@ -18,11 +19,24 @@ comm = fe.MPI.comm_world
 rank = comm.Get_rank()
 
 
+def stress_term(u, v, nu, nu_t, laplacian=False):
+    if laplacian:
+        return nu * fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
+    else:
+        return ((nu + nu_t) * fe.inner(fe.grad(u) + fe.grad(u).T, fe.grad(v)) * fe.dx
+                - (nu + nu_t) * (2. / 3.) * fe.inner(fe.div(u) * fe.Identity(2), fe.grad(v)) * fe.dx)
+
+
 class ShallowTwo:
     def __init__(self, mesh, params, control):
         self.dt = control["dt"]
-        self.theta = control["theta"]
         self.simulation = control["simulation"]
+        self.use_imex = control["use_imex"]
+        self.use_les = control["use_les"]
+
+        # use theta-method or IMEX (CNLF)
+        if not self.use_imex:
+            self.theta = control["theta"]
 
         if type(mesh) == str:
             # read mesh from file
@@ -36,8 +50,10 @@ class ShallowTwo:
 
         logger.info(f"mesh has {self.mesh.num_cells()} elements")
         self.dx = self.mesh.hmin()
+        self.dx_max = self.mesh.hmax()
         self.x = fe.SpatialCoordinate(self.mesh)
         self.x_coords = self.mesh.coordinates()
+        logger.info("dx(max) = %.5f, dx(min): %.5f", self.dx_max, self.dx)
 
         assert np.all(self.x_coords >= 0.)
         self.L = np.amax(self.x_coords[:, 0])
@@ -63,6 +79,7 @@ class ShallowTwo:
 
         self.du = fe.Function(W)
         self.du_prev = fe.Function(W)
+        self.du_prev_prev = fe.Function(W)
 
         # storage for later
         self.du_vertices = np.copy(self.du.compute_vertex_values())
@@ -72,42 +89,79 @@ class ShallowTwo:
         self.C = params["C"]
         self.H = params["H"]
 
+        # set inflow conditions
+        self.u_inflow = params["u_inflow"]
+        self.inflow_period = params["inflow_period"]
+        logger.info("CFL number is %f", self.u_inflow * self.dt / self.dx)
+
+        self.inlet_velocity = fe.Expression(
+            (f"{self.u_inflow} * sin(2 * pi * t / {self.inflow_period})", "0.0"),
+            pi=np.pi, t=0., degree=4)
+        self.inlet_velocity.t = 0.
+
         # initialise solution objects
         self.F = None
         self.J = None
-        self.bcs = None
+        self.bcs = []
         self.solver = None
 
-    def setup_form(self, du, du_prev):
+    def setup_form(self):
         g = fe.Constant(9.8)
         nu = fe.Constant(self.nu)
         dt = fe.Constant(self.dt)
         C = fe.Constant(self.C)
 
-        u, h = fe.split(du)
-        u_prev, h_prev = fe.split(du_prev)
+        u_prev, h_prev = fe.split(self.du_prev)
+        u_prev_prev, h_prev_prev = fe.split(self.du_prev_prev)
+        v_u, v_h = fe.TestFunctions(self.W)  # test fcn's
 
-        # check for bottom drag
-        u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
+        # weak form: continuity is integrated by parts
+        if self.use_imex:
+            u, h = fe.TrialFunctions(self.W)
+            u_theta = 9/16 * u + 3/8 * u_prev + 1/16 * u_prev_prev
+            h_theta = 9/16 * h + 3/8 * h_prev + 1/16 * h_prev_prev
+            # u_theta = 1/2 * u + 1/2 * u_prev
+            # h_theta = 1/2 * h + 1/2 * h_prev
+            u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
+            self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
+                      + g * fe.inner(fe.grad(h_theta), v_u) * fe.dx  # surface term
+                      + (3/2 * fe.inner(fe.dot(u_prev, fe.nabla_grad(u_prev)), v_u) * fe.dx
+                         - 1/2 * fe.inner(fe.dot(u_prev_prev, fe.nabla_grad(u_prev_prev)), v_u) * fe.dx)
+                      + (3/2 * C * (u_mag / (self.H + h_prev + 1e-14)) * fe.inner(u_prev, v_u) * fe.dx
+                         - 1/2 * C * (u_mag / (self.H + h_prev_prev + 1e-14)) * fe.inner(u_prev_prev, v_u) * fe.dx)
+                      + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
+                      - (3/2 * fe.inner((self.H + h_prev) * u_prev, fe.grad(v_h)) * fe.dx
+                         - 1/2 * fe.inner((self.H + h_prev_prev) * u_prev_prev, fe.grad(v_h)) * fe.dx))  # bottom friction
+        else:
+            u, h = fe.split(self.du)
+            u_theta = self.theta * u + (1 - self.theta) * u_prev
+            h_theta = self.theta * h + (1 - self.theta) * h_prev
+            u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
+            self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
+                      + g * fe.inner(fe.grad(h_theta), v_u) * fe.dx  # surface term
+                      + fe.inner(fe.dot(u_theta, fe.nabla_grad(u_theta)), v_u) * fe.dx
+                      + C * (u_mag / (self.H + h_theta)) * fe.inner(u_theta, v_u) * fe.dx
+                      + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
+                      - fe.inner((self.H + h_theta) * u_theta, fe.grad(v_h)) * fe.dx)  # bottom friction
 
-        v_u, v_h = fe.TestFunctions(self.W)
-        self.f_u = fe.Function(self.U_space)
-        self.f_h = fe.Function(self.H_space)
+        # laplacian/LES is used for dissipative effects
+        # add in (parameterised) dissipation effects
+        if self.use_les:
+            self.les = LES(
+                mesh=self.mesh,
+                fs=self.H_space,
+                u=u_prev,
+                density=1.0,
+                smagorinsky_coefficient=0.164)
+            nu_t = self.les.eddy_viscosity
+            dissipation = stress_term(
+                u_theta, v_u, nu, nu_t=nu_t, laplacian=False)
+        else:
+            nu_t = 0.
+            dissipation = stress_term(
+                u_theta, v_u, nu, nu_t=nu_t, laplacian=True)
 
-        # weak form for the system:
-        # continuity is integrated by parts;
-        # laplacian is used for dissipative effects (no LES)
-        u_mid = self.theta * u + (1 - self.theta) * u_prev
-        h_mid = self.theta * h + (1 - self.theta) * h_prev
-        F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
-             + fe.inner(fe.dot(u_mid, fe.nabla_grad(u_mid)), v_u) * fe.dx  # advection
-             + nu * fe.inner(fe.grad(u_mid), fe.grad(v_u)) * fe.dx  # dissipation
-             + C * (u_mag / (self.H + h_mid)) * fe.inner(u_mid, v_u) * fe.dx  # bottom friction
-             + g * fe.inner(fe.grad(h_mid), v_u) * fe.dx  # surface term
-             + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
-             - fe.inner((self.H + h_mid) * u_mid, fe.grad(v_h)) * fe.dx
-             - fe.inner(self.f_u, v_u) * fe.dx
-             - fe.inner(self.f_h, v_h) * fe.dx)
+        self.F += dissipation
 
         if self.simulation == "mms":
             self.u_exact = fe.Expression(
@@ -118,9 +172,8 @@ class ShallowTwo:
             def boundary(x, on_boundary):
                 return on_boundary
 
-            bc_u = fe.DirichletBC(self.W.sub(0), self.u_exact, boundary)
-            bc_h = fe.DirichletBC(self.W.sub(1), self.h_exact, boundary)
-            bcs = [bc_u, bc_h]
+            self.bcs.append(fe.DirichletBC(self.W.sub(0), self.u_exact, boundary))
+            self.bcs.append(fe.DirichletBC(self.W.sub(1), self.h_exact, boundary))
         elif self.simulation in ["cylinder", "laminar"]:
             # basic BC's
             # inflow: fixed, u:= u_in
@@ -128,24 +181,17 @@ class ShallowTwo:
             # walls: no-normal flow, dot(u, n) = 0
             # obstacle: no-slip, u:= (0, 0)
             # set inflow via Dirichlet BC's
-            logger.info("CFL number is %f", 0.04 * self.dt / self.dx)
-            self.u_in = fe.Function(self.U_space)
-            self.inlet_velocity = fe.Expression(
-                ("0.04 * sin(2 * pi * t / 60)", "0.0"), pi=np.pi, t=0., degree=4)
-            self.inlet_velocity.t = 0.
-            self.u_in.interpolate(self.inlet_velocity)
             no_slip = fe.Constant((0., 0.))
 
             inflow = "near(x[0], 0)"
-            bcu_inflow = fe.DirichletBC(self.W.sub(0), self.u_in, inflow)
-            bcs = [bcu_inflow]
+            bcu_inflow = fe.DirichletBC(self.W.sub(0), self.inlet_velocity, inflow)
+            self.bcs.append(bcu_inflow)
 
             # TODO: option for cylinder mesh
             if self.simulation == "cylinder":
-                # cylinder = "on_boundary && x[0] >= 0.18 && x[0] <= 0.22 && x[1] >= 0.26 && x[1] <= 0.3"
                 cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 "
                             + "&& x[1] >= 0.45 && x[1] <= 0.55")
-                bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
+                self.bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
             # need to include surface integrals as we integrate by parts
             # only left and right boundaries matter;
@@ -168,73 +214,94 @@ class ShallowTwo:
             # all other conditions are just no-normal/no-slip
             n = fe.FacetNormal(self.mesh)
             ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
-            F += ((self.H + h_mid) * fe.inner(u_mid, n) * v_h * ds(1)  # inflow
-                  + (self.H + h_mid) * fe.inner(self.u_in, n) * v_h * ds(2)  # flather
-                  + (self.H + h_mid) * fe.sqrt(g / self.H) * h_mid * v_h * ds(2))  # flather
+            if self.use_imex:
+                self.F += ((3/2 * (self.H + h_prev) * fe.inner(u_prev, n) * v_h * ds(1)
+                            - 1/2 * (self.H + h_prev_prev) * fe.inner(u_prev_prev, n) * v_h * ds(1))  # inflow
+                           + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
+                           + (3/2 * (self.H + h_prev) * fe.sqrt(g / self.H) * h_prev * v_h * ds(2)
+                              - 1/2 * (self.H + h_prev_prev) * fe.sqrt(g / self.H) * h_prev_prev * v_h * ds(2)))  # outflow
+                self.J = None
+            else:
+                self.F += ((self.H + h_theta) * fe.inner(u_theta, n) * v_h * ds(1)  # inflow
+                           + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
+                           + (self.H + h_theta) * fe.sqrt(g / self.H) * h_theta * v_h * ds(2))
+                self.J = fe.derivative(self.F, self.du, fe.TrialFunction(self.W))
 
-        J = fe.derivative(F, du, fe.TrialFunction(self.W))
-        return F, J, bcs
+    def setup_solver(self, use_ksp=False):
+        if self.use_imex:
+            self.fem_lhs, self.fem_rhs = fe.lhs(self.F), fe.rhs(self.F)
+            self.A = fe.assemble(self.fem_lhs)
+            for bc in self.bcs:
+                bc.apply(self.A)
 
-    def setup_solver(self, F, du, bcs, J):
-        problem = fe.NonlinearVariationalProblem(F, du, bcs=bcs, J=J)
-        solver = fe.NonlinearVariationalSolver(problem)
+            # setup solver and set operators
+            self.solver = fe.PETScKrylovSolver()
+            self.solver.set_operator(self.A)
+            self.solver.set_reuse_preconditioner(True)
 
-        # vanilla fenics solver options
-        prm = solver.parameters
-        # prm['newton_solver']['absolute_tolerance'] = 1e-8
-        # prm['newton_solver']['relative_tolerance'] = 1e-6
-        # prm['newton_solver']['convergence_criterion'] = "incremental"
-        # prm['newton_solver']['maximum_iterations'] = 50
-        # prm['newton_solver']['relaxation_parameter'] = 0.5
+            if use_ksp:
+                fe.PETScOptions.set("ksp_type", "gmres")
+                fe.PETScOptions.set("pc_type", "jacobi")
+            else:
+                fe.PETScOptions.set("ksp_type", "preonly")
+                fe.PETScOptions.set("pc_type", "lu")
 
-        # PETSc SNES config
-        prm["nonlinear_solver"] = "newton"
-        # prm["snes_solver"]["line_search"] = "bt"
+            fe.PETScOptions.set("ksp_gmres_restart", 100)
+            fe.PETScOptions.set("ksp_atol", 1e-6)
+            fe.PETScOptions.set("ksp_rtol", 1e-6)
+            fe.PETScOptions.set("ksp_view")
+        else:
+            problem = fe.NonlinearVariationalProblem(
+                self.F, self.du, bcs=self.bcs, J=self.J)
+            self.solver = fe.NonlinearVariationalSolver(problem)
 
-        # direct solver: MUMPS
-        prm["snes_solver"]["linear_solver"] = "mumps"
+            # use PETSc SNES for all solvers
+            prm = self.solver.parameters
+            prm["nonlinear_solver"] = "snes"
+            prm["snes_solver"]["line_search"] = "bt"
 
-        # iterative solver options
-        # prm["snes_solver"]["linear_solver"] = "gmres"
-        # # prm["snes_solver"]["preconditioner"] = "jacobi"
-        # prm["snes_solver"]["preconditioner"] = "fieldsplit"
+            if use_ksp:
+                # PETSc SNES linear solver: gmres + jacobi
+                prm["snes_solver"]["linear_solver"] = "gmres"
+                prm["snes_solver"]["preconditioner"] = "jacobi"
 
-        # fieldsplit options from firedrake-fluids
-        fe.PETScOptions.set("snes_linesearch_monitor")
-        fe.PETScOptions.set("snes_stol", 0)
-        fe.PETScOptions.set("pc_fieldsplit_type", "schur")
-        fe.PETScOptions.set("pc_fieldsplit_schur_fact_type", "FULL")
-        fe.PETScOptions.set("fieldsplit_0_ksp_type", "preonly")
-        fe.PETScOptions.set("fieldsplit_1_ksp_type", "preonly")
-        fe.PETScOptions.set("fieldsplit_0_pc_type", "ilu")
-        fe.PETScOptions.set("fieldsplit_1_pc_type", "ilu")
+                # set PETSc options
+                fe.PETScOptions.set("ksp_gmres_restart", 100)
+            else:
+                # PETSc SNES linear solver: MUMPS
+                prm["snes_solver"]["linear_solver"] = "mumps"
 
-        logger.info(f"using {prm['snes_solver']['linear_solver']} solver with {prm['snes_solver']['preconditioner']} PC")
+            logger.info(f"using {prm['snes_solver']['linear_solver']} solver "
+                        + f"with {prm['snes_solver']['preconditioner']} PC")
 
-        # solver convergence
-        prm["snes_solver"]["relative_tolerance"] = 1e-5
-        prm["snes_solver"]['absolute_tolerance'] = 1e-5
-        prm["snes_solver"]["maximum_iterations"] = 100
-        prm["snes_solver"]['error_on_nonconvergence'] = True
-        prm["snes_solver"]['krylov_solver']['nonzero_initial_guess'] = True
+            # SNES configs
+            prm["snes_solver"]["report"] = True
+            prm["snes_solver"]["relative_tolerance"] = 1e-5
+            prm["snes_solver"]['absolute_tolerance'] = 1e-5
+            prm["snes_solver"]["maximum_iterations"] = 10_000
+            prm["snes_solver"]['error_on_nonconvergence'] = True
+            prm["snes_solver"]['krylov_solver']['nonzero_initial_guess'] = True
 
-        # solver reporting
-        prm["snes_solver"]['krylov_solver']['report'] = False
-        prm["snes_solver"]['krylov_solver']['monitor_convergence'] = False
+            # solver reporting
+            prm["snes_solver"]['krylov_solver']['relative_tolerance'] = 1e-6
+            prm["snes_solver"]['krylov_solver']['absolute_tolerance'] = 1e-6
+            prm["snes_solver"]['krylov_solver']['report'] = True
+            prm["snes_solver"]['krylov_solver']['monitor_convergence'] = False
 
-        # don't print outputs from the Newton solver
-        prm["snes_solver"]["report"] = True
+    def solve(self):
+        if self.use_les:
+            self.les.solve()
 
-        return solver
+        if self.use_imex:
+            b = fe.assemble(self.fem_rhs)
+            for bc in self.bcs:
+                bc.apply(b)
 
-    def solve(self, bdf2=False):
-        # solve at current time
-        self.solver.solve()
-
-        # set previous timesteps appropriately
-        if bdf2:
-            logger.warning("BDF2 option is DEPRECATED and will be removed soon")
-            raise ValueError
+            self.solver.solve(self.du.vector(), b)
+            fe.assign(self.du_prev_prev, self.du_prev)
+        else:
+            # solve at current time
+            self.solver.solve()
 
         fe.assign(self.du_prev, self.du)
 
