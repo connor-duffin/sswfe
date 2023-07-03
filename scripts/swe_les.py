@@ -25,7 +25,8 @@ class LES:
                                                    self.eddy_viscosity,
                                                    bcs=[])
         self.solver = fe.LinearVariationalSolver(self.problem)
-        return
+        self.solver.parameters["linear_solver"] = "gmres"
+        self.solver.parameters["preconditioner"] = "jacobi"
 
     def strain_rate_tensor(self, u):
         S = 0.5 * (fe.grad(u) + fe.grad(u).T)
