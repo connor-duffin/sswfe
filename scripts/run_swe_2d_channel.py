@@ -26,7 +26,7 @@ args = parser.parse_args()
 
 # run 8 from Paul's JFM paper
 params = dict(
-    nu=1e-5, H=0.053, C=1e-3, u_inflow=0.004, inflow_period=120)
+    nu=2e-6, H=0.053, C=1e-3, u_inflow=0.004, inflow_period=120)
 control = dict(
     dt=5e-2, theta=0.5, simulation="cylinder", use_imex=False, use_les=False)
 
