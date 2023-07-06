@@ -69,7 +69,8 @@ class ShallowTwo:
         W = self.W = fe.FunctionSpace(self.mesh, TH)
 
         # get dof labels for each
-        self.u_dofs = self.W.sub(0).dofmap().dofs()
+        self.u_dofs = self.W.sub(0).sub(0).dofmap().dofs()
+        self.v_dofs = self.W.sub(0).sub(1).dofmap().dofs()
         self.h_dofs = self.W.sub(1).dofmap().dofs()
 
         # split up function spaces for later interpolation
@@ -163,69 +164,57 @@ class ShallowTwo:
 
         self.F += dissipation
 
-        if self.simulation == "mms":
-            self.u_exact = fe.Expression(
-                ("cos(x[0]) * sin(x[1])", "sin(pow(x[0], 2)) + cos(x[1])"),
-                degree=4)
-            self.h_exact = fe.Expression("sin(x[0]) * sin(x[1])", degree=4)
+        # basic BC's
+        # inflow: fixed, u:= u_in
+        # outflow: flather, u := u_in + sqrt(g / H) * h
+        # walls: no-normal flow, dot(u, n) = 0
+        # obstacle: no-slip, u:= (0, 0)
+        # set inflow via Dirichlet BC's
+        no_slip = fe.Constant((0., 0.))
 
-            def boundary(x, on_boundary):
-                return on_boundary
+        inflow = "near(x[0], 0)"
+        bcu_inflow = fe.DirichletBC(self.W.sub(0), self.inlet_velocity, inflow)
+        self.bcs.append(bcu_inflow)
 
-            self.bcs.append(fe.DirichletBC(self.W.sub(0), self.u_exact, boundary))
-            self.bcs.append(fe.DirichletBC(self.W.sub(1), self.h_exact, boundary))
-        elif self.simulation in ["cylinder", "laminar"]:
-            # basic BC's
-            # inflow: fixed, u:= u_in
-            # outflow: flather, u := u_in + sqrt(g / H) * h
-            # walls: no-normal flow, dot(u, n) = 0
-            # obstacle: no-slip, u:= (0, 0)
-            # set inflow via Dirichlet BC's
-            no_slip = fe.Constant((0., 0.))
+        # TODO: option for cylinder mesh
+        if self.simulation == "cylinder":
+            cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 "
+                        + "&& x[1] >= 0.45 && x[1] <= 0.55")
+            self.bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
-            inflow = "near(x[0], 0)"
-            bcu_inflow = fe.DirichletBC(self.W.sub(0), self.inlet_velocity, inflow)
-            self.bcs.append(bcu_inflow)
+        # need to include surface integrals as we integrate by parts
+        # only left and right boundaries matter;
+        # the rest are zero (no-slip OR no-normal flow)
+        class LeftBoundary(fe.SubDomain):
+            def inside(self, x, on_boundary):
+                tol = 1e-14
+                return on_boundary and abs(x[0] - 0.) < tol
 
-            # TODO: option for cylinder mesh
-            if self.simulation == "cylinder":
-                cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 "
-                            + "&& x[1] >= 0.45 && x[1] <= 0.55")
-                self.bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
+        class RightBoundary(fe.SubDomain):
+            def inside(self, x, on_boundary):
+                tol = 1e-14
+                return on_boundary and abs(x[0] - 2.) < tol
 
-            # need to include surface integrals as we integrate by parts
-            # only left and right boundaries matter;
-            # the rest are zero (no-slip OR no-normal flow)
-            class LeftBoundary(fe.SubDomain):
-                def inside(self, x, on_boundary):
-                    tol = 1e-14
-                    return on_boundary and abs(x[0] - 0.) < tol
+        gamma_left = LeftBoundary()
+        gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
+        gamma_right = RightBoundary()
+        gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
 
-            class RightBoundary(fe.SubDomain):
-                def inside(self, x, on_boundary):
-                    tol = 1e-14
-                    return on_boundary and abs(x[0] - 2.) < tol
-
-            gamma_left = LeftBoundary()
-            gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
-            gamma_right = RightBoundary()
-            gamma_right.mark(self.boundaries, 2)  # mark with tag 2 for RHS
-
-            # all other conditions are just no-normal/no-slip
-            n = fe.FacetNormal(self.mesh)
-            ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
-            if self.use_imex:
-                self.F += ((3/2 * (self.H + h_prev) * fe.inner(u_prev, n) * v_h * ds(1)
-                            - 1/2 * (self.H + h_prev_prev) * fe.inner(u_prev_prev, n) * v_h * ds(1))  # inflow
-                           + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
-                           + (3/2 * (self.H + h_prev) * fe.sqrt(g / self.H) * h_prev * v_h * ds(2)
-                              - 1/2 * (self.H + h_prev_prev) * fe.sqrt(g / self.H) * h_prev_prev * v_h * ds(2)))  # outflow
-                self.J = None
-            else:
-                self.F += ((self.H + h_theta) * fe.inner(u_theta, n) * v_h * ds(1)  # inflow
-                           + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
-                           + (self.H + h_theta) * fe.sqrt(g / self.H) * h_theta * v_h * ds(2))
-                self.J = fe.derivative(self.F, self.du, fe.TrialFunction(self.W))
+        # all other conditions are just no-normal/no-slip
+        n = fe.FacetNormal(self.mesh)
+        ds = fe.Measure('ds', domain=self.mesh, subdomain_data=self.boundaries)
+        if self.use_imex:
+            self.F += ((3/2 * (self.H + h_prev) * fe.inner(u_prev, n) * v_h * ds(1)
+                        - 1/2 * (self.H + h_prev_prev) * fe.inner(u_prev_prev, n) * v_h * ds(1))  # inflow
+                       + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
+                       + (3/2 * (self.H + h_prev) * fe.sqrt(g / self.H) * h_prev * v_h * ds(2)
+                          - 1/2 * (self.H + h_prev_prev) * fe.sqrt(g / self.H) * h_prev_prev * v_h * ds(2)))  # outflow
+            self.J = None
+        else:
+            self.F += ((self.H + h_theta) * fe.inner(u_theta, n) * v_h * ds(1)  # inflow
+                       + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
+                       + (self.H + h_theta) * fe.sqrt(g / self.H) * h_theta * v_h * ds(2))
+            self.J = fe.derivative(self.F, self.du, fe.TrialFunction(self.W))
 
     def setup_solver(self, use_ksp=False):
         if self.use_imex:
@@ -350,6 +339,7 @@ class ShallowTwoFilter(ShallowTwo):
 
         self.mean = np.copy(self.du.vector().get_local())
         self.k_init_u = stat_params["k_init_u"]
+        self.k_init_v = stat_params["k_init_v"]
         self.k_init_h = stat_params["k_init_h"]
         self.k = stat_params["k"]
 
@@ -357,28 +347,44 @@ class ShallowTwoFilter(ShallowTwo):
         self.cov_sqrt = np.zeros((self.mean.shape[0], self.k))
         self.cov_sqrt_prev = np.zeros((self.mean.shape[0], self.k))
         self.cov_sqrt_pred = np.zeros((self.mean.shape[0],
-                                       self.k + self.k_init_u + self.k_init_h))
+                                       self.k + self.k_init_u + self.k_init_v + self.k_init_h))
         self.G_sqrt = np.zeros((self.mean.shape[0],
-                                self.k_init_u + self.k_init_h))
+                                self.k_init_u + self.k_init_v + self.k_init_h))
+
+        # setup spaces in which we posit things accordingly
+        U, V = self.U.split()
+        U_space, V_space = U.collapse(), V.collapse()
 
         if stat_params["rho_u"] > 0.:
             self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
-                self.U_space, self.k_init_u,
+                U_space, self.k_init_u,
                 stat_params["rho_u"],
                 stat_params["ell_u"])
 
             self.G_sqrt[self.u_dofs, 0:len(self.Ku_vals)] = (
                 Ku_vecs @ np.diag(np.sqrt(self.Ku_vals)))
-            print(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+            logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+
+        if stat_params["rho_v"] > 0.:
+            self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
+                V_space, self.k_init_v,
+                stat_params["rho_v"],
+                stat_params["ell_v"])
+
+            self.G_sqrt[self.v_dofs,
+                        self.k_init_u:(self.k_init_u + len(self.Kv_vals))] = (
+                Kv_vecs @ np.diag(np.sqrt(self.Kv_vals)))
+            logger.info(f"Spectral diff (v): {self.Kv_vals[-1]:.4e}, {self.Kv_vals[0]:.4e}")
 
         if stat_params["rho_h"] > 0.:
             self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
                 self.H_space, self.k_init_h,
                 stat_params["rho_h"],
                 stat_params["ell_h"])
-            self.G_sqrt[self.h_dofs, self.k_init_u:(self.k_init_u + len(self.Kh_vals))] = (
+            self.G_sqrt[self.h_dofs,
+                        (self.k_init_u + self.k_init_v):(self.k_init_u + self.k_init_v + len(self.Kh_vals))] = (
                 Kh_vecs @ np.diag(np.sqrt(self.Kh_vals)))
-            print(f"Spectral diff (h): {self.Kh_vals[-1]:.4e}, {self.Kh_vals[0]:.4e}")
+            logger.info(f"Spectral diff (h): {self.Kh_vals[-1]:.4e}, {self.Kh_vals[0]:.4e}")
 
         # multiplication *after* the initial construction
         self.G_sqrt[:] = M_scipy @ self.G_sqrt

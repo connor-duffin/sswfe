@@ -10,13 +10,12 @@ from swe_2d import ShallowTwo, ShallowTwoFilter
 @pytest.fixture
 def swe_2d():
     mesh = fe.UnitSquareMesh(32, 32)
-    params = {"nu": 0.6, "C": 0.0025, "H": 50.}
+    params = {"nu": 0.6, "C": 0.0025, "H": 50., "u_inflow": 0.01}
     control = {"dt": 0.01,
                "theta": 1.,
-               "simulation": "mms",
-               "integrate_continuity_by_parts": False,
-               "laplacian": True,
-               "les": False}
+               "simulation": "laminar",
+               "use_imex": False,
+               "use_les": False}
     return ShallowTwo(mesh, params, control)
 
 
@@ -26,9 +25,8 @@ def test_shallowtwo_init():
     control = {"dt": 0.01,
                "theta": 1.,
                "simulation": "mms",
-               "integrate_continuity_by_parts": False,
-               "laplacian": True,
-               "les": False}
+               "use_imex": False,
+               "use_les": False}
     swe = ShallowTwo(mesh, params, control)
 
     assert swe.L == 1.
@@ -41,19 +39,18 @@ def test_shallowtwo_init():
     assert_allclose(swe.dx, np.sqrt(2 * (1 / 32)**2))
     assert len(swe.du_vertices) == 3 * len(swe.x_coords)
 
-    F, J, bcs = swe.setup_form(swe.du, swe.du_prev)
-    solver = swe.setup_solver(F, swe.du, bcs, J)
+    swe.setup_form()
+    swe.setup_solver(use_ksp=False)
 
     params = {"nu": 1e-4, "C": 0., "H": 0.073}
     control = {"dt": 0.01,
                "theta": 1.,
                "simulation": "laminar",
-               "integrate_continuity_by_parts": True,
-               "laplacian": True,
-               "les": False}
+               "use_imex": False,
+               "use_les": False}
     swe = ShallowTwo(mesh, params, control)
-    F, J, bcs = swe.setup_form(swe.du, swe.du_prev)
-    swe.setup_solver(F, swe.du, bcs, J)
+    swe.setup_form()
+    swe.setup_solver()
 
     for forcing in [swe.f_u, swe.f_h]:
         f = np.copy(forcing.vector().get_local())
@@ -62,9 +59,10 @@ def test_shallowtwo_init():
 
 def test_shallowtwo_solve(swe_2d):
     # verify one step with euler
-    F, J, bcs = swe_2d.setup_form(swe_2d.du, swe_2d.du_prev)
-    solver = swe_2d.setup_solver(F, swe_2d.du, bcs, J)
-    solver.solve()
+    swe_2d.setup_form()
+    swe_2d.setup_solver()
+    swe_2d.solve()
+
     u_p = np.copy(swe_2d.du_prev.vector().get_local())
     u = np.copy(swe_2d.du.vector().get_local())
     assert np.linalg.norm(u - u_p) >= 1e-6
@@ -83,21 +81,20 @@ def test_shallowtwo_jac_bc(swe_2d):
     control = {"dt": 0.01,
                "theta": 0.51,
                "simulation": "laminar",
-               "integrate_continuity_by_parts": False,
-               "laplacian": True,
-               "les": False}
+               "use_imex": False,
+               "use_les": False}
     swe_2d = ShallowTwo(mesh, params, control)
     assert swe_2d.L == 2.
     assert swe_2d.B == 1.
 
-    F, J, bcs = swe_2d.setup_form(swe_2d.du, swe_2d.du_prev)
-    solver = swe_2d.setup_solver(F, swe_2d.du, bcs, J)
+    swe_2d.setup_form()
+    swe_2d.setup_solver()
 
     for i in range(10):
-        solver.solve()
+        swe_2d.solve()
 
-        J_approx = fe.assemble(fe.derivative(F, swe_2d.du))
-        J_model = fe.assemble(J)
+        J_approx = fe.assemble(fe.derivative(swe_2d.F, swe_2d.du))
+        J_model = fe.assemble(swe_2d.J)
         np.testing.assert_allclose(J_approx.array(), J_model.array())
 
         fe.assign(swe_2d.du_prev, swe_2d.du)
@@ -152,23 +149,54 @@ def test_shallowtwo_save(swe_2d):
 def test_shallowtwo_filter():
     mesh = fe.RectangleMesh(fe.Point(0., 0.),
                             fe.Point(2., 1.), 32, 16)
-    params = {"nu": 1e-2, "C": 0., "H": 0.05}
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "u_inflow": 0.004, "inflow_period": 120}
     control = {"dt": 0.01,
                "theta": 0.5,
                "simulation": "laminar",
-               "integrate_continuity_by_parts": False,
-               "laplacian": True,
-               "les": False}
-    swe_2d = ShallowTwoFilter(mesh, params, control)
-    assert swe_2d.L == 2.
-    assert swe_2d.B == 1.
+               "use_imex": False,
+               "use_les": False}
+    swe = ShallowTwoFilter(mesh, params, control)
+    assert swe.L == 2.
+    assert swe.B == 1.
 
     # check that all the dofs line up
-    assert_allclose(np.unique(swe_2d.W.dofmap().dofs()),
-                    np.unique(np.concatenate((swe_2d.u_dofs, swe_2d.h_dofs))))
+    assert_allclose(np.unique(swe.W.dofmap().dofs()),
+                    np.unique(np.concatenate((swe.u_dofs,
+                                              swe.v_dofs,
+                                              swe.h_dofs))))
 
-    # estimate filter etc
-    stat_params = dict(rho_u=1., rho_h=1., ell_u=1., ell_h=1.,
-                       k_init_u=16, k_init_h=16, k=16)
-    swe_2d.setup_filter(stat_params)
-    print(swe_2d.Ku_vals, swe_2d.Kh_vals)
+    # setup filter (basically compute prior additive noise covariance)
+    stat_params = dict(rho_u=1., rho_v=1., rho_h=1.,
+                       ell_u=0.5, ell_v=0.5, ell_h=0.5,
+                       k_init_u=16, k_init_v=16, k_init_h=16, k=16)
+    swe.setup_filter(stat_params)
+
+    # as on the same fcn space
+    assert_allclose(swe.Ku_vals, swe.Kv_vals)
+
+    # check that cross-correlations are 0, accordingly
+    G = swe.G_sqrt @ swe.G_sqrt.T
+    assert_allclose(G[np.ix_(swe.u_dofs, swe.v_dofs)], 0.)
+    assert_allclose(G[np.ix_(swe.u_dofs, swe.h_dofs)], 0.)
+    assert_allclose(G[np.ix_(swe.v_dofs, swe.u_dofs)], 0.)
+    assert_allclose(G[np.ix_(swe.v_dofs, swe.h_dofs)], 0.)
+    assert_allclose(G[np.ix_(swe.h_dofs, swe.u_dofs)], 0.)
+    assert_allclose(G[np.ix_(swe.h_dofs, swe.v_dofs)], 0.)
+
+    # check BC's are zero
+    # TODO(connor) debug and make sure this is sound
+    u = fe.Function(swe.U_space)
+    u.interpolate(fe.Expression(("1.", "1."), degree=4), )
+
+    def boundary(x, on_boundary):
+        return on_boundary
+
+    bc = fe.DirichletBC(swe.U_space, fe.Constant((0, 0)), boundary)
+    bc.apply(u.vector())
+    dofs = np.isclose(u.vector().get_local(), 0.)
+    bc_dofs = np.array(swe.W.sub(0).dofmap().dofs())[dofs]
+
+    assert_allclose(swe.G_sqrt[bc_dofs, :], 0.)
+
+    # TODO(connor) check against actual covariance
+    # TODO(connor) check sparsity pattern
