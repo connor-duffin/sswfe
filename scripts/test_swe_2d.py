@@ -5,6 +5,8 @@ import fenics as fe
 
 from numpy.testing import assert_allclose
 from swe_2d import ShallowTwo, ShallowTwoFilter
+from scipy.sparse.linalg import spsolve
+from statfenics.utils import dolfin_to_csr
 
 
 @pytest.fixture
@@ -173,30 +175,38 @@ def test_shallowtwo_filter():
 
     # as on the same fcn space
     assert_allclose(swe.Ku_vals, swe.Kv_vals)
+    # not too fazed on these: as long as they are ~ok
+    assert_allclose(swe.Ku_vals, swe.Kh_vals, atol=1e-2)
 
     # check that cross-correlations are 0, accordingly
-    G = swe.G_sqrt @ swe.G_sqrt.T
-    assert_allclose(G[np.ix_(swe.u_dofs, swe.v_dofs)], 0.)
-    assert_allclose(G[np.ix_(swe.u_dofs, swe.h_dofs)], 0.)
-    assert_allclose(G[np.ix_(swe.v_dofs, swe.u_dofs)], 0.)
-    assert_allclose(G[np.ix_(swe.v_dofs, swe.h_dofs)], 0.)
-    assert_allclose(G[np.ix_(swe.h_dofs, swe.u_dofs)], 0.)
-    assert_allclose(G[np.ix_(swe.h_dofs, swe.v_dofs)], 0.)
+    u, v = fe.TrialFunction(swe.W), fe.TestFunction(swe.W)
+    M = fe.assemble(fe.inner(u, v) * fe.dx)
+    M_scipy = dolfin_to_csr(M)
+
+    K_sqrt = spsolve(M_scipy, swe.G_sqrt)
+    K = K_sqrt @ K_sqrt.T
+    assert_allclose(K[np.ix_(swe.u_dofs, swe.v_dofs)], 0.)
+    assert_allclose(K[np.ix_(swe.u_dofs, swe.h_dofs)], 0.)
+    assert_allclose(K[np.ix_(swe.v_dofs, swe.u_dofs)], 0.)
+    assert_allclose(K[np.ix_(swe.v_dofs, swe.h_dofs)], 0.)
+    assert_allclose(K[np.ix_(swe.h_dofs, swe.u_dofs)], 0.)
+    assert_allclose(K[np.ix_(swe.h_dofs, swe.v_dofs)], 0.)
 
     # check BC's are zero
-    # TODO(connor) debug and make sure this is sound
-    u = fe.Function(swe.U_space)
-    u.interpolate(fe.Expression(("1.", "1."), degree=4), )
+    U, V = swe.U.split()
+    U_space, V_space = U.collapse(), V.collapse()
 
-    def boundary(x, on_boundary):
-        return on_boundary
+    for space, global_space in zip([U_space, V_space, swe.H_space],
+                                   [swe.W.sub(0).sub(0), swe.W.sub(0).sub(1), swe.W.sub(1)]):
+        g = fe.Function(space)
+        g.interpolate(fe.Expression("1.", degree=4), )
 
-    bc = fe.DirichletBC(swe.U_space, fe.Constant((0, 0)), boundary)
-    bc.apply(u.vector())
-    dofs = np.isclose(u.vector().get_local(), 0.)
-    bc_dofs = np.array(swe.W.sub(0).dofmap().dofs())[dofs]
+        def boundary(x, on_boundary):
+            return on_boundary
 
-    assert_allclose(swe.G_sqrt[bc_dofs, :], 0.)
+        bc = fe.DirichletBC(space, fe.Constant((0)), boundary)
+        bc.apply(g.vector())
+        dofs = np.isclose(g.vector().get_local(), 0.)
+        bc_dofs = np.array(global_space.dofmap().dofs())[dofs]
 
-    # TODO(connor) check against actual covariance
-    # TODO(connor) check sparsity pattern
+        assert_allclose(K[bc_dofs, bc_dofs], 0., atol=1e-12)
