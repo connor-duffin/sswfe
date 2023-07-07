@@ -130,6 +130,9 @@ def test_shallowtwo_filter():
                "use_imex": False,
                "use_les": False}
     swe = ShallowTwoFilter(mesh, params, control)
+    swe.setup_form()
+    swe.setup_solver()
+
     assert swe.L == 2.
     assert swe.B == 1.
 

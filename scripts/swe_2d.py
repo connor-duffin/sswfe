@@ -4,10 +4,9 @@ import logging
 import numpy as np
 import fenics as fe
 
-from scipy.linalg import cholesky, cho_factor, cho_solve
-from statfenics.covariance import (sq_exp_covariance,
-                                   sq_exp_evd_hilbert,
-                                   sq_exp_evd)
+from scipy.linalg import cholesky, cho_factor, cho_solve, eigh
+from scipy.sparse.linalg import splu
+from statfenics.covariance import sq_exp_evd_hilbert
 from statfenics.utils import dolfin_to_csr
 from swe_les import LES
 
@@ -137,7 +136,7 @@ class ShallowTwo:
             u, h = fe.split(self.du)
             u_theta = self.theta * u + (1 - self.theta) * u_prev
             h_theta = self.theta * h + (1 - self.theta) * h_prev
-            u_mag = fe.sqrt(fe.inner(u_prev, u_prev))
+            u_mag = fe.sqrt(fe.inner(u_prev, u_prev) + 1e-12)  # for numerical stability
             self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
                       + g * fe.inner(fe.grad(h_theta), v_u) * fe.dx  # surface term
                       + fe.inner(fe.dot(u_theta, fe.nabla_grad(u_theta)), v_u) * fe.dx
@@ -215,6 +214,7 @@ class ShallowTwo:
                        + (self.H + h_theta) * fe.inner(self.inlet_velocity, n) * v_h * ds(2)  # flather
                        + (self.H + h_theta) * fe.sqrt(g / self.H) * h_theta * v_h * ds(2))
             self.J = fe.derivative(self.F, self.du, fe.TrialFunction(self.W))
+            self.J_prev = fe.derivative(self.F, self.du_prev, fe.TrialFunction(self.W))
 
     def setup_solver(self, use_ksp=False):
         if self.use_imex:
@@ -287,10 +287,13 @@ class ShallowTwo:
                 bc.apply(b)
 
             self.solver.solve(self.du.vector(), b)
-            fe.assign(self.du_prev_prev, self.du_prev)
         else:
             # solve at current time
             self.solver.solve()
+
+    def set_prev(self):
+        if self.use_imex:
+            fe.assign(self.du_prev_prev, self.du_prev)
 
         fe.assign(self.du_prev, self.du)
 
@@ -333,6 +336,10 @@ class ShallowTwoFilter(ShallowTwo):
         super().__init__(*args, **kwargs)
 
     def setup_filter(self, stat_params):
+        if self.use_imex:
+            logger.error("Not setup for IMEX yet, bailing out")
+            raise NotImplementedError
+
         u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
         M = fe.assemble(fe.inner(u, v) * fe.dx)
         M_scipy = dolfin_to_csr(M)
@@ -389,8 +396,62 @@ class ShallowTwoFilter(ShallowTwo):
         # multiplication *after* the initial construction
         self.G_sqrt[:] = M_scipy @ self.G_sqrt
 
+        try:
+            self.H = stat_params["H"]
+            self.sigma_y = stat_params["sigma_y"]
+
+            self.n_obs = self.H.shape[0]
+
+            self.mean_obs = np.zeros((self.n_obs, ))
+            self.HL = np.zeros((self.n_obs, self.k))
+            self.cov_obs = np.zeros((self.n_obs, self.n_obs))
+
+            self.R = np.zeros((self.k, self.k))
+        except KeyError:
+            logger.warn(
+                "Obs. operator and noise not parsed: setup for prior run ONLY")
+
+        # tangent linear models
+        self.J_mat = fe.assemble(self.J)
+        self.J_prev_mat = fe.assemble(self.J_prev)
+
+        self.J_scipy = dolfin_to_csr(self.J_mat)
+        self.J_prev_scipy = dolfin_to_csr(self.J_prev_mat)
+
+        # initialise LU factorisation (from scratch) of tangent linear
+        self.J_scipy_lu = splu(self.J_scipy.tocsc())
+
+    def assemble_derivatives(self):
+        self.J_mat = fe.assemble(self.J)
+        self.J_prev_mat = fe.assemble(self.J_prev)
+
+        # set things up appropriately
+        for J in [self.J_mat, self.J_prev_mat]:
+            for bc in self.bcs: bc.apply(J)
+
+        # TODO(connor): re-use sparsity pattern and speed-up
+        self.J_scipy = dolfin_to_csr(self.J_mat)
+        self.J_prev_scipy = dolfin_to_csr(self.J_prev_mat)
+
     def prediction_step(self, t):
-        raise NotImplementedError
+        self.solve()
+        self.mean[:] = self.du.vector().get_local()
+
+        # TODO(connor): reuse sparsity patterns?
+        self.assemble_derivatives()
+        self.J_scipy_lu = splu(self.J_scipy.tocsc())  # options=dict(Fact="SamePattern")
+
+        self.cov_sqrt_pred[:, :self.k] = self.J_prev_scipy @ self.cov_sqrt_prev
+        self.cov_sqrt_pred[:, self.k:] = np.sqrt(self.dt) * self.G_sqrt
+        self.cov_sqrt_pred[:] = self.J_scipy_lu.solve(self.cov_sqrt_pred)
+
+        # perform reduction
+        # TODO avoid reallocation
+        D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
+        D, V = D[::-1], V[:, ::-1]
+        logger.debug("Prop. variance kept in the reduction: %f",
+                     np.sum(D[0:self.k]) / np.sum(D))
+        np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
     def compute_lml(self, y, H, sigma_y):
         self.mean[:] = self.du.vector().get_local()
@@ -408,35 +469,32 @@ class ShallowTwoFilter(ShallowTwo):
                 - log_det / 2
                 - n_obs * np.log(2 * np.pi) / 2)
 
-    def update_step(self, y, H, sigma_y, return_correction=False):
+    def update_step(self, y, compute_lml=False):
         self.mean[:] = self.du.vector().get_local()
-        mean_obs = H @ self.mean
+        mean_obs = self.H @ self.mean
 
-        HL = H @ self.cov_sqrt
+        HL = self.H @ self.cov_sqrt
         cov_obs = HL @ HL.T
-        cov_obs[np.diag_indices_from(cov_obs)] += sigma_y**2 + 1e-10
-        S_chol = cho_factor(cov_obs, lower=True)
+        cov_obs[np.diag_indices_from(cov_obs)] += self.sigma_y**2 + 1e-10
+        S_chol = cho_factor(
+            cov_obs, lower=True, overwrite_a=True, check_finite=False)
         S_inv_y = cho_solve(S_chol, y - mean_obs)
-
-        # kalman updates: for high-dimensions this is the bottleneck
-        # TODO(connor): avoid re-allocation and poor memory management
-        HL = H @ self.cov_sqrt
         S_inv_HL = cho_solve(S_chol, HL)
 
-        correction = self.cov_sqrt @ HL.T @ S_inv_y
-        self.mean += correction
+        if compute_lml:
+            log_det = 2 * np.sum(np.log(np.diag(S_chol[0])))
+
+            lml = (- S_inv_y @ S_inv_y / 2
+                   - log_det / 2
+                   - self.n_obs * np.log(2 * np.pi) / 2)
+
+        self.mean += self.cov_sqrt @ HL.T @ S_inv_y
         R = cholesky(np.eye(HL.shape[1]) - HL.T @ S_inv_HL, lower=True)
         self.cov_sqrt[:] = self.cov_sqrt @ R
 
         # update fenics state vector
         self.du.vector().set_local(self.mean.copy())
 
-        if return_correction:
-            return correction
-
     def set_prev(self):
         fe.assign(self.du_prev, self.du)
-        if self.lr:
-            self.cov_sqrt_prev[:] = self.cov_sqrt
-        else:
-            self.cov_prev[:] = self.cov
+        self.cov_sqrt_prev[:] = self.cov_sqrt
