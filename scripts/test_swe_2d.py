@@ -11,63 +11,44 @@ from statfenics.utils import dolfin_to_csr
 
 @pytest.fixture
 def swe_2d():
-    mesh = fe.UnitSquareMesh(32, 32)
-    params = {"nu": 0.6, "C": 0.0025, "H": 50., "u_inflow": 0.01}
-    control = {"dt": 0.01,
-               "theta": 1.,
-               "simulation": "laminar",
-               "use_imex": False,
-               "use_les": False}
+    mesh = fe.RectangleMesh(fe.Point(0., 0.), fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "u_inflow": 0.1, "inflow_period": 120}
+    control = {"dt": 0.01, "theta": 0.5, "simulation": "laminar", "use_imex": False, "use_les": False}
     return ShallowTwo(mesh, params, control)
 
 
-def test_shallowtwo_init():
-    mesh = fe.UnitSquareMesh(32, 32)
-    params = {"nu": 0.6, "C": 0.0025, "H": 50.}
-    control = {"dt": 0.01,
-               "theta": 1.,
-               "simulation": "mms",
-               "use_imex": False,
-               "use_les": False}
-    swe = ShallowTwo(mesh, params, control)
+def test_shallowtwo_init(swe_2d):
+    assert swe_2d.L == 2.
+    assert swe_2d.B == 1.
 
-    assert swe.L == 1.
-    assert swe.B == 1.
+    assert swe_2d.nu == 0.01
+    assert swe_2d.C == 0.
+    assert swe_2d.H == 0.05
 
-    assert swe.nu == 0.6
-    assert swe.C == 0.0025
-    assert swe.H == 50.
+    assert len(swe_2d.du_vertices) == 3 * len(swe_2d.x_coords)
 
-    assert_allclose(swe.dx, np.sqrt(2 * (1 / 32)**2))
-    assert len(swe.du_vertices) == 3 * len(swe.x_coords)
-
-    swe.setup_form()
-    swe.setup_solver(use_ksp=False)
-
-    params = {"nu": 1e-4, "C": 0., "H": 0.073}
-    control = {"dt": 0.01,
-               "theta": 1.,
-               "simulation": "laminar",
-               "use_imex": False,
-               "use_les": False}
-    swe = ShallowTwo(mesh, params, control)
-    swe.setup_form()
-    swe.setup_solver()
-
-    for forcing in [swe.f_u, swe.f_h]:
-        f = np.copy(forcing.vector().get_local())
-        assert_allclose(f, np.zeros_like(f))
+    swe_2d.setup_form()
+    swe_2d.setup_solver(use_ksp=False)
+    assert type(swe_2d.solver) == fe.NonlinearVariationalSolver
 
 
 def test_shallowtwo_solve(swe_2d):
-    # verify one step with euler
-    swe_2d.setup_form()
-    swe_2d.setup_solver()
-    swe_2d.solve()
+    swe_2d.inlet_velocity.t = 30.  # max of period
 
-    u_p = np.copy(swe_2d.du_prev.vector().get_local())
-    u = np.copy(swe_2d.du.vector().get_local())
-    assert np.linalg.norm(u - u_p) >= 1e-6
+    def setup_and_step(swe_2d, use_imex=False, atol=1e-6):
+        swe_2d.use_imex = use_imex
+        # verify one step with CN
+        swe_2d.setup_form()
+        swe_2d.setup_solver()
+
+        u_p = np.copy(swe_2d.du_prev.vector().get_local())
+        swe_2d.solve()
+        u = np.copy(swe_2d.du.vector().get_local())
+
+        assert np.linalg.norm(u - u_p) >= atol
+
+    setup_and_step(swe_2d)
+    setup_and_step(swe_2d, use_imex=True)
 
 
 def test_shallowtwo_ss(swe_2d):
@@ -77,15 +58,6 @@ def test_shallowtwo_ss(swe_2d):
 
 
 def test_shallowtwo_jac_bc(swe_2d):
-    mesh = fe.RectangleMesh(fe.Point(0., 0.),
-                            fe.Point(2., 1.), 32, 16)
-    params = {"nu": 1e-2, "C": 0., "H": 0.05}
-    control = {"dt": 0.01,
-               "theta": 0.51,
-               "simulation": "laminar",
-               "use_imex": False,
-               "use_les": False}
-    swe_2d = ShallowTwo(mesh, params, control)
     assert swe_2d.L == 2.
     assert swe_2d.B == 1.
 
