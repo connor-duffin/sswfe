@@ -10,6 +10,10 @@ from statfenics.covariance import sq_exp_evd_hilbert
 from statfenics.utils import dolfin_to_csr
 from swe_les import LES
 
+# for parallelisation
+from petsc4py import PETSc
+from slepc4py import SLEPc
+
 # initialise the logger
 logger = logging.getLogger(__name__)
 
@@ -264,7 +268,7 @@ class ShallowTwo:
                         + f"with {prm['snes_solver']['preconditioner']} PC")
 
             # SNES configs
-            prm["snes_solver"]["report"] = True
+            prm["snes_solver"]["report"] = False
             prm["snes_solver"]["relative_tolerance"] = 1e-5
             prm["snes_solver"]['absolute_tolerance'] = 1e-5
             prm["snes_solver"]["maximum_iterations"] = 10_000
@@ -404,8 +408,11 @@ class ShallowTwoFilter(ShallowTwo):
 
             self.mean_obs = np.zeros((self.n_obs, ))
             self.HL = np.zeros((self.n_obs, self.k))
-            self.cov_obs = np.zeros((self.n_obs, self.n_obs))
 
+            self.S_inv_HL = np.zeros((self.n_obs, self.k))
+            self.S_inv_y = np.zeros((self.n_obs, ))
+
+            self.cov_obs = np.zeros((self.n_obs, self.n_obs))
             self.R = np.zeros((self.k, self.k))
         except KeyError:
             logger.warn(
@@ -446,55 +453,216 @@ class ShallowTwoFilter(ShallowTwo):
         self.cov_sqrt_pred[:] = self.J_scipy_lu.solve(self.cov_sqrt_pred)
 
         # perform reduction
-        # TODO avoid reallocation
+        # TODO(connor) avoid reallocation
         D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
         D, V = D[::-1], V[:, ::-1]
         logger.debug("Prop. variance kept in the reduction: %f",
                      np.sum(D[0:self.k]) / np.sum(D))
         np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
-    def compute_lml(self, y, H, sigma_y):
-        self.mean[:] = self.du.vector().get_local()
-        mean_obs = H @ self.mean
-        n_obs = len(mean_obs)
-
-        HL = H @ self.cov_sqrt
-        cov_obs = HL @ HL.T
-        cov_obs[np.diag_indices_from(cov_obs)] += sigma_y**2 + 1e-10
-        S_chol = cho_factor(cov_obs, lower=True)
-        S_inv_y = cho_solve(S_chol, y - mean_obs)
-        log_det = 2 * np.sum(np.log(np.diag(S_chol[0])))
-
-        return (- S_inv_y @ S_inv_y / 2
-                - log_det / 2
-                - n_obs * np.log(2 * np.pi) / 2)
-
     def update_step(self, y, compute_lml=False):
-        self.mean[:] = self.du.vector().get_local()
-        mean_obs = self.H @ self.mean
-
-        HL = self.H @ self.cov_sqrt
-        cov_obs = HL @ HL.T
-        cov_obs[np.diag_indices_from(cov_obs)] += self.sigma_y**2 + 1e-10
+        self.mean_obs[:] = self.H @ self.mean
+        self.HL[:] = self.H @ self.cov_sqrt
+        self.cov_obs[:] = self.HL @ self.HL.T
+        self.cov_obs[np.diag_indices_from(self.cov_obs)] += self.sigma_y**2 + 1e-10
         S_chol = cho_factor(
-            cov_obs, lower=True, overwrite_a=True, check_finite=False)
-        S_inv_y = cho_solve(S_chol, y - mean_obs)
-        S_inv_HL = cho_solve(S_chol, HL)
+            self.cov_obs, lower=True, overwrite_a=True, check_finite=False)
+
+        self.S_inv_y[:] = cho_solve(S_chol, y - self.mean_obs)
+        self.S_inv_HL[:] = cho_solve(S_chol, self.HL)
+
+        self.mean += self.cov_sqrt @ self.HL.T @ self.S_inv_y
+        self.R[:] = cholesky(
+            np.eye(self.HL.shape[1]) - self.HL.T @ self.S_inv_HL, lower=True)
+        self.cov_sqrt[:] = self.cov_sqrt @ self.R
+
+        # update fenics state vector
+        self.du.vector().set_local(self.mean)
 
         if compute_lml:
             log_det = 2 * np.sum(np.log(np.diag(S_chol[0])))
-
-            lml = (- S_inv_y @ S_inv_y / 2
+            lml = (- self.S_inv_y @ self.S_inv_y / 2
                    - log_det / 2
                    - self.n_obs * np.log(2 * np.pi) / 2)
-
-        self.mean += self.cov_sqrt @ HL.T @ S_inv_y
-        R = cholesky(np.eye(HL.shape[1]) - HL.T @ S_inv_HL, lower=True)
-        self.cov_sqrt[:] = self.cov_sqrt @ R
-
-        # update fenics state vector
-        self.du.vector().set_local(self.mean.copy())
+            return lml
 
     def set_prev(self):
         fe.assign(self.du_prev, self.du)
         self.cov_sqrt_prev[:] = self.cov_sqrt
+
+
+class ShallowTwoFilterPETSc(ShallowTwo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup_filter(self, stat_params):
+        if self.use_imex:
+            logger.error("Not setup for IMEX yet, bailing out")
+            raise NotImplementedError
+
+        M = fe.PETScMatrix()
+        u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
+        M = fe.assemble(fe.inner(u, v) * fe.dx, tensor=M)
+        M = M.mat()
+
+        self.mean, _ = M.getVecs()
+
+        self.k_init_u = stat_params["k_init_u"]
+        self.k_init_v = stat_params["k_init_v"]
+        self.k_init_h = stat_params["k_init_h"]
+        self.k = stat_params["k"]
+
+        # matrix inits
+        self.dofmap = self.W.dofmap()
+        n_dofs = self.dofmap.index_map().size(fe.IndexMap.MapSize.OWNED)
+        n_dofs_global = self.dofmap.index_map().size(fe.IndexMap.MapSize.GLOBAL)
+
+        self.cov_sqrt = PETSc.Mat()
+        self.cov_sqrt.create()
+        self.cov_sqrt.setSizes([n_dofs, self.k], [n_dofs, self.k])
+        self.cov_sqrt.setType("dense")
+        self.cov_sqrt.setUp()
+        self.cov_sqrt_prev = self.cov_sqrt.copy()
+
+        self.cov_sqrt_pred = PETSc.Mat()
+        self.cov_sqrt_pred.create()
+        self.cov_sqrt_pred.setSizes(
+            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h],
+            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h])
+        self.cov_sqrt_pred.setType("dense")
+        self.cov_sqrt_pred.setUp()
+
+        self.K_sqrt = PETSc.Mat()
+        self.K_sqrt.create()
+        self.K_sqrt.setSizes(
+            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h],
+            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h])
+        self.K_sqrt.setType("dense")
+        self.K_sqrt.setUp()
+
+        # setup spaces in which we posit things accordingly
+        U, V = self.U.split()
+        U_space, V_space = U.collapse(), V.collapse()
+
+        if stat_params["rho_u"] > 0.:
+            self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
+                U_space, self.k_init_u,
+                stat_params["rho_u"],
+                stat_params["ell_u"])
+
+            # initialise `u` values
+            for i in range(self.k_init_u):
+                self.K_sqrt.setValues(
+                    self.u_dofs, i, Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i]))
+
+            logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+
+        if stat_params["rho_v"] > 0.:
+            self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
+                V_space, self.k_init_v,
+                stat_params["rho_v"],
+                stat_params["ell_v"])
+
+            # initialise `v` values
+            for i in range(self.k_init_v):
+                self.K_sqrt.setValues(
+                    self.v_dofs, self.k_init_u + i,
+                    Kv_vecs[:, i] * np.sqrt(self.Kv_vals[i]))
+
+        if stat_params["rho_h"] > 0.:
+            self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
+                self.H_space, self.k_init_h,
+                stat_params["rho_h"],
+                stat_params["ell_h"])
+
+            # initialise `h` values
+            for i in range(self.k_init_h):
+                self.K_sqrt.setValues(
+                    self.v_dofs, self.k_init_u + self.k_init_v + i,
+                    Kh_vecs[:, i] * np.sqrt(self.Kh_vals[i]))
+
+        # finally assemble everything
+        for mat in [self.cov_sqrt, self.cov_sqrt_prev, self.cov_sqrt_pred, self.K_sqrt]:
+            mat.assemblyBegin()
+            mat.assemblyEnd()
+
+        # multiplication *after* the initial construction
+        self.G_sqrt = self.K_sqrt.copy()
+        M.matMult(self.K_sqrt, self.G_sqrt)
+
+        # tangent linear models
+        self.J_mat = fe.PETScMatrix()
+        fe.assemble(self.J, tensor=self.J_mat)
+
+        self.J_prev_mat = fe.PETScMatrix()
+        fe.assemble(self.J_prev, tensor=self.J_prev_mat)
+
+    def assemble_derivatives(self):
+        fe.assemble(self.J, tensor=self.J_mat)
+        fe.assemble(self.J_prev, tensor=self.J_prev_mat)
+
+        # set things up appropriately
+        for J in [self.J_mat, self.J_prev_mat]:
+            for bc in self.bcs: bc.apply(J)
+
+    def prediction_step(self, t):
+        self.solve()
+        self.mean.setArray(self.du.vector().get_local())
+
+        # TODO(connor): reuse sparsity patterns?
+        self.assemble_derivatives()
+
+        # vec_extract, _ = self.J_mat.mat().getVecs()
+        # vec_solve = self.J_mat.getVecs()
+        for i in range(self.k):
+            col_prev = self.cov_sqrt_prev.getDenseColumnVec(i)
+            col_pred = self.cov_sqrt_pred.getDenseColumnVec(i)
+
+            self.J_prev_mat.mat().mult(col_prev, col_pred)
+
+            self.cov_sqrt_prev.restoreDenseColumnVec(i)
+            self.cov_sqrt_pred.restoreDenseColumnVec(i)
+
+        for i in range(self.k_init_u + self.k_init_v + self.k_init_h):
+            col_pred = self.cov_sqrt_pred.getDenseColumnVec(self.k + i)
+            col_G = self.G_sqrt.getDenseColumnVec(i)
+
+            # copy values from G into pred
+            col_pred.copy(col_G)
+            col_pred.scale(np.sqrt(self.dt))
+
+            self.cov_sqrt_pred.restoreDenseColumnVec(self.k + i)
+            self.G_sqrt.restoreDenseColumnVec(i)
+
+        # TODO(connor): this should NOT be created every iteration
+        ksp = PETSc.KSP().create()
+        ksp.setType(PETSc.KSP.Type.GMRES)
+        ksp.getPC().setType(PETSc.PC.Type.JACOBI)
+        # ksp.setType(PETSc.KSP.Type.PREONLY)
+        # ksp.getPC().setType(PETSc.PC.Type.LU)
+
+        # allow command-line customization
+        ksp.setFromOptions()
+        ksp.setOperators(self.J_mat.mat())
+
+        for i in range(self.k + self.k_init_u + self.k_init_v + self.k_init_h):
+            col_pred = self.cov_sqrt_pred.getDenseColumnVec(i)
+            col_pred_cpy = col_pred.copy()
+            ksp.solve(col_pred_cpy, col_pred)
+            self.cov_sqrt_pred.restoreDenseColumnVec(i)
+
+        # setup and solve SVD problem
+        E = SLEPc.SVD()
+        E.create()
+        E.setDimensions(nsv=self.k)
+        E.setFromOptions()
+        E.setOperators(self.cov_sqrt_pred)
+        E.solve()
+
+        # perform reduction
+        # TODO(connor) avoid reallocation
+        # D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
+        # D, V = D[::-1], V[:, ::-1]
+        # logger.debug("Prop. variance kept in the reduction: %f",
+        #              np.sum(D[0:self.k]) / np.sum(D))
+        # np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)

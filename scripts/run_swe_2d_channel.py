@@ -8,8 +8,6 @@ from argparse import ArgumentParser
 from swe_2d import ShallowTwo
 from tqdm import tqdm
 
-from mpi4py import MPI
-
 logging.basicConfig(
     format='%(asctime)s - %(relativeCreated)d ms - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO)
