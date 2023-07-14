@@ -6,8 +6,8 @@ import fenics as fe
 
 from scipy.linalg import cholesky, cho_factor, cho_solve, eigh
 from scipy.sparse.linalg import splu
-from statfenics.covariance import sq_exp_evd_hilbert
 from statfenics.utils import dolfin_to_csr
+from statfenics.covariance import sq_exp_spectral_density
 from swe_les import LES
 
 # for parallelisation
@@ -21,6 +21,149 @@ logger = logging.getLogger(__name__)
 comm = fe.MPI.comm_world
 rank = comm.Get_rank()
 
+
+def boundary(x, on_boundary):
+    return on_boundary
+
+
+def laplacian_evd(V, k=64, bc="Dirichlet"):
+    """
+    Aproximate the smallest k eigenvalues/eigenfunctions of the Laplacian.
+
+    I.e. solve u_xx + u_yy + u_zz + ... = - lambda u,
+    using shift-invert mode in SLEPc for scalable computations.
+
+    Parameters
+    ----------
+    V : fenics.FunctionSpace
+        FunctionSpace on which to compute the approximation.
+    k : int, optional
+        Number of modes to take in the approximation.
+    bc : str, optional
+        Boundary conditions to use in the approximation. Either 'Dirichlet' or
+        'Neumann'.
+    """
+    e = V.element()
+    dim = e.num_sub_elements()
+
+    def boundary(x, on_boundary):
+        return on_boundary
+
+    bc_types = ["Dirichlet", "Neumann"]
+    if bc not in bc_types:
+        raise ValueError("Invalid bc, expected one of {bc_types}")
+    elif bc == "Dirichlet":
+        if dim == 0:
+            bc = fe.DirichletBC(V, fe.Constant(0), boundary)
+        elif dim == 2:
+            bc = fe.DirichletBC(V, fe.Constant((0, 0, 0)), boundary)
+        else:
+            raise NotImplementedError
+    else:
+        bc = None
+
+    # define variational problem
+    u = fe.TrialFunction(V)
+    v = fe.TestFunction(V)
+
+    a = fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
+    A = fe.PETScMatrix()
+    fe.assemble(a, tensor=A)
+
+    M = fe.PETScMatrix()
+    M_no_bc = fe.PETScMatrix()
+    fe.assemble(fe.inner(u, v) * fe.dx, tensor=M)
+    fe.assemble(fe.inner(u, v) * fe.dx, tensor=M_no_bc)
+
+    if bc is not None:
+        # sets BC rows of A to identity
+        bc.apply(A)
+
+        # sets rows of M to zeros
+        bc.apply(M)
+        bc.zero(M)
+
+    M = M.mat()
+    M_no_bc = M_no_bc.mat()
+    A = A.mat()
+
+    # solver inspired by: cmaurini
+    # https://gist.github.com/cmaurini/6dea21fc01c6a07caeb96ff9c86dc81e
+    E = SLEPc.EPS()
+    E.create()
+    E.setOperators(A, M)
+    E.setDimensions(nev=k)
+    E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
+    E.setTarget(1e-14)
+    E.setTolerances(1e-12, 100000)
+    S = E.getST()
+    S.setType('sinvert')
+    E.setFromOptions()
+    E.solve()
+
+    # check that things have converged
+    logger.info("Eigenvalues converged: %d", E.getConverged())
+
+    # and set up objects for storage
+    vr, wr = A.getVecs()
+    vi, wi = A.getVecs()
+
+    laplace_eigenvals = np.zeros((k, ))
+    eigenvecs = np.zeros((vr.array_r.shape[0], k))
+    errors = np.zeros((k, ))
+
+    for i in range(k):
+        laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+        eigenvecs[:, i] = vr.array_r
+        errors[i] = E.computeError(i)
+
+    # scale so eigenfunctions are orthonormal on function space
+    # M = fe.PETScMatrix()
+    # fe.assemble(
+    #     fe.inner(fe.TrialFunction(V), fe.TestFunction(V)) * fe.dx,
+    #     tensor=M)
+    # M = M.mat()
+    # M_scipy = csr_matrix(M.getValuesCSR()[::-1], shape=M.size)
+    # eigenvecs_scale = eigenvecs.T @ M_scipy @ eigenvecs
+    # eigenvecs = eigenvecs / np.sqrt(eigenvecs_scale.diagonal())
+    return (laplace_eigenvals, eigenvecs)
+
+
+def sq_exp_evd_hilbert(V, k=64, scale=1., ell=1., bc="Dirichlet"):
+    """
+    Approximate the SqExp covariance using Hilbert-GP.
+
+    For full details:
+    Solin, A., Särkkä, S., 2020. Hilbert space methods for reduced-rank
+    Gaussian process regression. Stat Comput 30, 419–446.
+    https://doi.org/10.1007/s11222-019-09886-w
+
+    Parameters
+    ----------
+    V : fenics.FunctionSpace
+        FunctionSpace on which to compute the approximation.
+    k : int, optional
+        Number of modes to take in the approximation.
+    scale : float
+        Variance hyperparameter.
+    ell : float
+        Length-scale hyperparameter.
+    bc : str, optional
+        Boundary conditions to use in the approximation. Either 'Dirichlet' or
+        'Neumann'.
+    """
+    laplace_eigenvals, eigenvecs = laplacian_evd(V, k=k, bc=bc)
+
+    # enforce positivity --- picks up eigenvalues that are negative
+    laplace_eigenvals = np.abs(laplace_eigenvals)
+    logger.info("Laplacian eigenvalues: %s", laplace_eigenvals)
+    eigenvals = sq_exp_spectral_density(
+        np.sqrt(laplace_eigenvals),
+        scale=scale,
+        ell=ell,
+        D=V.mesh().geometric_dimension())
+
+    return (eigenvals, eigenvecs)
 
 def stress_term(u, v, nu, nu_t, laplacian=False):
     if laplacian:
@@ -519,43 +662,101 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         self.cov_sqrt = PETSc.Mat()
         self.cov_sqrt.create()
-        self.cov_sqrt.setSizes([n_dofs, self.k], [n_dofs, self.k])
+        self.cov_sqrt.setSizes([[n_dofs, n_dofs_global], [self.k, self.k]])
         self.cov_sqrt.setType("dense")
         self.cov_sqrt.setUp()
-        self.cov_sqrt_prev = self.cov_sqrt.copy()
+
+        self.cov_sqrt_prev = PETSc.Mat()
+        self.cov_sqrt_prev.create()
+        self.cov_sqrt_prev.setSizes([[n_dofs, n_dofs_global], [self.k, self.k]])
+        self.cov_sqrt_prev.setType("dense")
+        self.cov_sqrt_prev.setUp()
 
         self.cov_sqrt_pred = PETSc.Mat()
         self.cov_sqrt_pred.create()
         self.cov_sqrt_pred.setSizes(
-            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h],
-            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h])
+            [[n_dofs, n_dofs_global],
+             [self.k + self.k_init_u + self.k_init_v + self.k_init_h,
+              self.k + self.k_init_u + self.k_init_v + self.k_init_h]])
         self.cov_sqrt_pred.setType("dense")
         self.cov_sqrt_pred.setUp()
 
+        # create this matrix for later use
+        self.C = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
+
         self.K_sqrt = PETSc.Mat()
         self.K_sqrt.create()
-        self.K_sqrt.setSizes(
-            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h],
-            [n_dofs, self.k + self.k_init_u + self.k_init_v + self.k_init_h])
+        self.K_sqrt.setSizes([[n_dofs, n_dofs_global],
+                              [self.k_init_u + self.k_init_v + self.k_init_h,
+                               self.k_init_u + self.k_init_v + self.k_init_h]])
         self.K_sqrt.setType("dense")
         self.K_sqrt.setUp()
 
         # setup spaces in which we posit things accordingly
-        U, V = self.U.split()
-        U_space, V_space = U.collapse(), V.collapse()
+        # U, V = self.U.split()
+        # U_space, V_space = U.collapse(), V.collapse()
+        U_space = self.W
+        print(len(self.dofmap.dofs()))
+
+        u = fe.TrialFunction(U_space)
+        q = fe.TestFunction(U_space)
+
+        a = fe.inner(fe.grad(u), fe.grad(q)) * fe.dx
+        A = fe.PETScMatrix()
+        fe.assemble(a, tensor=A)
+
+        M = fe.PETScMatrix()
+        M_no_bc = fe.PETScMatrix()
+        fe.assemble(fe.inner(u, q) * fe.dx, tensor=M)
+        fe.assemble(fe.inner(u, q) * fe.dx, tensor=M_no_bc)
+
+        bc = fe.DirichletBC(U_space, fe.Constant((0, 0, 0)), boundary)
+        bc.apply(A)
+
+        # sets rows of M to zeros
+        bc.apply(M)
+        bc.zero(M)
+
+        E = SLEPc.EPS(comm=self.mesh.mpi_comm())
+        E.create()
+        E.setOperators(A.mat())
+        E.setDimensions(nev=self.k)
+        E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
+        E.setTarget(1e-14)
+        E.setTolerances(1e-12, 100000)
+        S = E.getST()
+        S.setType('sinvert')
+        E.setFromOptions()
+        E.solve()
+
+        vr, wr = A.mat().getVecs()
+        vi, wi = A.mat().getVecs()
+
+        laplace_eigenvals = np.zeros((self.k, ))
+        eigenvecs = np.zeros((vr.array_r.shape[0], self.k))
+        errors = np.zeros((self.k, ))
+
+        for i in range(self.k):
+            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            eigenvecs[:, i] = vr.array_r
+            errors[i] = E.computeError(i)
+
+        print(eigenvecs.shape)
 
         if stat_params["rho_u"] > 0.:
             self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
-                U_space, self.k_init_u,
+                self.W.sub(0).sub(0),
+                self.k_init_u,
                 stat_params["rho_u"],
                 stat_params["ell_u"])
+            print(self.Ku_vecs.shape)
 
             # initialise `u` values
             for i in range(self.k_init_u):
                 self.K_sqrt.setValues(
-                    self.u_dofs, i, Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i]))
+                    self.local_dofs, i, Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i]))
 
-            logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+            # logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
 
         if stat_params["rho_v"] > 0.:
             self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
@@ -628,23 +829,28 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             col_G = self.G_sqrt.getDenseColumnVec(i)
 
             # copy values from G into pred
-            col_pred.copy(col_G)
+            col_G.copy(col_pred)
             col_pred.scale(np.sqrt(self.dt))
 
             self.cov_sqrt_pred.restoreDenseColumnVec(self.k + i)
             self.G_sqrt.restoreDenseColumnVec(i)
 
+        # import matplotlib.pyplot as plt
+        # plt.imshow(self.cov_sqrt_pred.getDenseArray(readonly=True))
+        # plt.show()
+
         # TODO(connor): this should NOT be created every iteration
         ksp = PETSc.KSP().create()
-        ksp.setType(PETSc.KSP.Type.GMRES)
-        ksp.getPC().setType(PETSc.PC.Type.JACOBI)
-        # ksp.setType(PETSc.KSP.Type.PREONLY)
-        # ksp.getPC().setType(PETSc.PC.Type.LU)
+        # ksp.setType(PETSc.KSP.Type.GMRES)
+        # ksp.getPC().setType(PETSc.PC.Type.JACOBI)
+        ksp.setType(PETSc.KSP.Type.PREONLY)
+        ksp.getPC().setType(PETSc.PC.Type.LU)
 
         # allow command-line customization
         ksp.setFromOptions()
         ksp.setOperators(self.J_mat.mat())
 
+        # and here we create the requisite objects and the like
         for i in range(self.k + self.k_init_u + self.k_init_v + self.k_init_h):
             col_pred = self.cov_sqrt_pred.getDenseColumnVec(i)
             col_pred_cpy = col_pred.copy()
@@ -652,17 +858,39 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             self.cov_sqrt_pred.restoreDenseColumnVec(i)
 
         # setup and solve SVD problem
-        E = SLEPc.SVD()
-        E.create()
-        E.setDimensions(nsv=self.k)
-        E.setFromOptions()
-        E.setOperators(self.cov_sqrt_pred)
-        E.solve()
+        self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred, self.C)
 
-        # perform reduction
-        # TODO(connor) avoid reallocation
-        # D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
-        # D, V = D[::-1], V[:, ::-1]
-        # logger.debug("Prop. variance kept in the reduction: %f",
-        #              np.sum(D[0:self.k]) / np.sum(D))
-        # np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
+        # setup EPS system for leading eigenvalues
+        E = SLEPc.EPS()
+        E.create()
+        E.setDimensions(nev=self.k)
+        E.setProblemType(SLEPc.EPS.ProblemType.HEP)
+        E.setOperators(self.C)
+        E.solve()
+        nconv = E.getConverged()
+
+        # create matrix for values
+        self.U = PETSc.Mat().create()
+        self.U.setSizes(
+            [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k],
+            [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
+        self.U.setType("dense")
+        self.U.setUp()
+        self.U.assemblyBegin()
+        self.U.assemblyEnd()
+
+        # create placeholder for imag. values
+        _, vi = self.C.createVecs()
+        vals = np.zeros((nconv, ), dtype=np.complex128)
+        for i in range(self.k):
+            u = self.U.getDenseColumnVec(i)
+            vals[i] = E.getEigenpair(i, u, vi)
+            self.U.restoreDenseColumnVec(i)
+
+        self.cov_sqrt_pred.matMult(self.U, result=self.cov_sqrt)
+
+    def set_prev(self):
+        """ Copy values into previous matrix. """
+        fe.assign(self.du_prev, self.du)
+        self.cov_sqrt.copy(result=self.cov_sqrt_prev,
+                           structure=PETSc.Mat.Structure.SAME)
