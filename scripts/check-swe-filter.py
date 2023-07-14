@@ -18,8 +18,10 @@ parser = ArgumentParser()
 parser.add_argument("--use_numpy", action="store_true")
 args = parser.parse_args()
 
-# mesh = "./mesh/branson.xdmf"
-mesh = fe.RectangleMesh(fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
+comm = fe.MPI.comm_world
+
+mesh = "./mesh/branson-refined.xdmf"
+# mesh = fe.RectangleMesh(comm, fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
 params = dict(
     nu=1e-5, C=0., H=0.053, u_inflow=0.004, inflow_period=120)
 control = dict(
@@ -30,9 +32,9 @@ control = dict(
     use_les=False)
 
 if args.use_numpy:
-    swe = ShallowTwoFilter(mesh, params, control)
+    swe = ShallowTwoFilter(mesh, params, control, comm)
 else:
-    swe = ShallowTwoFilterPETSc(mesh, params, control)
+    swe = ShallowTwoFilterPETSc(mesh, params, control, comm)
 
 swe.setup_form()
 swe.setup_solver(use_ksp=True)
@@ -42,19 +44,19 @@ rho = 1e-2
 ell = 1.  # characteristic lengthscale from cylinder
 stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    ell_u=ell, ell_v=ell, ell_h=0.5,
-                   k_init_u=32, k_init_v=32, k_init_h=16, k=32)
+                   k_init_u=32, k_init_v=32, k_init_h=16, k=64)
 swe.setup_filter(stat_params)
 
-t = 0.
-t_final = 30.
-nt = np.int32(np.round(t_final / control["dt"]))
+# t = 0.
+# t_final = 30.
+# nt = np.int32(np.round(t_final / control["dt"]))
 
-i_dat = 0
-for i in trange(nt):
-    t += swe.dt
-    swe.inlet_velocity.t = t
-    swe.prediction_step(t)
-    swe.set_prev()
+# i_dat = 0
+# for i in trange(nt):
+#     t += swe.dt
+#     swe.inlet_velocity.t = t
+#     swe.prediction_step(t)
+#     swe.set_prev()
 
 #     if i % 2 == 0:
 #         assert np.isclose(t_data[i_dat], t)
