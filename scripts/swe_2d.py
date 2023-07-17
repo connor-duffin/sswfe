@@ -659,42 +659,54 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         # setup stuff for ordering
         self.dofmap = self.W.dofmap()
+        self.local_dofs = self.dofmap.dofs()
         lgmap = [int(x) for x in self.dofmap.tabulate_local_to_global_dofs()]
-        lgmap = PETSc.LGMap().create(lgmap, comm=comm)
+        lgmap = PETSc.LGMap().create(lgmap, comm=self.comm)
         n_dofs = self.dofmap.index_map().size(fe.IndexMap.MapSize.OWNED)
         n_dofs_global = self.dofmap.index_map().size(fe.IndexMap.MapSize.GLOBAL)
 
         # matrix inits
         self.cov_sqrt = PETSc.Mat()
-        self.cov_sqrt.create()
-        self.cov_sqrt.setSizes([[n_dofs, n_dofs_global], [self.k, self.k]])
+        self.cov_sqrt.create(comm=self.comm)
+        self.cov_sqrt.setSizes([[n_dofs, n_dofs_global], self.k])
         self.cov_sqrt.setType("dense")
         self.cov_sqrt.setUp()
+        self.cov_sqrt.setLGMap(
+            lgmap,
+            PETSc.LGMap().create([int(i) for i in range(self.k)], comm=self.comm))
 
         self.cov_sqrt_prev = PETSc.Mat()
-        self.cov_sqrt_prev.create()
-        self.cov_sqrt_prev.setSizes([[n_dofs, n_dofs_global], [self.k, self.k]])
+        self.cov_sqrt_prev.create(comm=self.comm)
+        self.cov_sqrt_prev.setSizes([[n_dofs, n_dofs_global], self.k])
         self.cov_sqrt_prev.setType("dense")
         self.cov_sqrt_prev.setUp()
+        self.cov_sqrt_prev.setLGMap(
+            lgmap,
+            PETSc.LGMap().create([int(i) for i in range(self.k)], comm=self.comm))
 
         self.cov_sqrt_pred = PETSc.Mat()
-        self.cov_sqrt_pred.create()
+        self.cov_sqrt_pred.create(comm=self.comm)
         self.cov_sqrt_pred.setSizes(
             [[n_dofs, n_dofs_global],
-             [self.k + self.k_init_u + self.k_init_v + self.k_init_h,
-              self.k + self.k_init_u + self.k_init_v + self.k_init_h]])
+             self.k + self.k_init_u + self.k_init_v + self.k_init_h])
         self.cov_sqrt_pred.setType("dense")
         self.cov_sqrt_pred.setUp()
+        self.cov_sqrt_pred.setLGMap(
+            lgmap,
+            PETSc.LGMap().create([int(i) for i in range(self.k + self.k_init_u + self.k_init_v + self.k_init_h)], comm=self.comm))
 
         self.K_sqrt = PETSc.Mat()
-        self.K_sqrt.create()
-        self.K_sqrt.setSizes([[n_dofs, n_dofs_global],
-                              [self.k_init_u + self.k_init_v + self.k_init_h,
-                               self.k_init_u + self.k_init_v + self.k_init_h]])
+        self.K_sqrt.create(comm=self.comm)
+        self.K_sqrt.setSizes(
+            [[n_dofs, n_dofs_global],
+             self.k_init_u + self.k_init_v + self.k_init_h])
         self.K_sqrt.setType("dense")
         self.K_sqrt.setUp()
-
-        self.K_sqrt.setLGMap(lgmap, lgmap)
+        self.K_sqrt.setLGMap(
+            lgmap,
+            PETSc.LGMap().create(
+                [int(i) for i in range(self.k_init_u + self.k_init_v + self.k_init_h)],
+                comm=self.comm))
 
         # NOW start eigenvalue computations
         u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
@@ -727,16 +739,52 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         E.setFromOptions()
         E.solve()
 
-        vr, wr = A.mat().getVecs()
-        vi, wi = A.mat().getVecs()
-
+        # set up vectors for storage
+        vr, vi = A.mat().getVecs()
         laplace_eigenvals = np.zeros((self.k, ))
-        eigenvecs = np.zeros((vr.array_r.shape[0], self.k))
         errors = np.zeros((self.k, ))
 
-        for i in range(self.k):
+        # u-eigenpairs
+        for i in range(self.k_init_u):
+            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            spec_dens = sq_exp_spectral_density(
+                np.sqrt(laplace_eigenvals[i]),
+                scale=stat_params["rho_u"],
+                ell=stat_params["ell_u"],
+                D=2
+            )
+            errors[i] = E.computeError(i)
+            self.K_sqrt.setValues(
+                self.u_dofs, i,
+                np.sqrt(spec_dens) * vr.getValues(self.u_dofs))
+
+        # v-eigenpairs
+        for i in range(self.k_init_v):
             laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
             errors[i] = E.computeError(i)
+            spec_dens = sq_exp_spectral_density(
+                np.sqrt(laplace_eigenvals[i]),
+                scale=stat_params["rho_v"],
+                ell=stat_params["ell_v"],
+                D=2
+            )
+            self.K_sqrt.setValues(
+                self.v_dofs, self.k_init_u + i,
+                np.sqrt(spec_dens) * vr.getValues(self.v_dofs))
+
+        # h-eigenpairs
+        for i in range(self.k_init_h):
+            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            spec_dens = sq_exp_spectral_density(
+                np.sqrt(laplace_eigenvals[i]),
+                scale=stat_params["rho_h"],
+                ell=stat_params["ell_h"],
+                D=2
+            )
+            errors[i] = E.computeError(i)
+            self.K_sqrt.setValues(
+                self.h_dofs, self.k_init_u + self.k_init_v + i,
+                np.sqrt(spec_dens) * vr.getValues(self.h_dofs))
 
         # should be the same
         # print(self.u_dofs)
@@ -745,36 +793,8 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         # print(eigenvecs[self.u_dofs, :])
 
         # set u_dofs values (should just be on local processor)
-        for i in range(self.k):
-            self.K_sqrt.setValues(
-                self.u_dofs, i,
-                np.ones((len(self.u_dofs), )) * np.sqrt(laplace_eigenvals[i]))
-
+        # for i in range(self.k):
         print(f"Spectral diff (laplacian): {laplace_eigenvals[-1]:.4e}, {laplace_eigenvals[0]:.4e}")
-
-        # if stat_params["rho_v"] > 0.:
-        #     self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
-        #         V_space, self.k_init_v,
-        #         stat_params["rho_v"],
-        #         stat_params["ell_v"])
-
-        #     # initialise `v` values
-        #     for i in range(self.k_init_v):
-        #         self.K_sqrt.setValues(
-        #             self.v_dofs, self.k_init_u + i,
-        #             Kv_vecs[:, i] * np.sqrt(self.Kv_vals[i]))
-
-        # if stat_params["rho_h"] > 0.:
-        #     self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
-        #         self.H_space, self.k_init_h,
-        #         stat_params["rho_h"],
-        #         stat_params["ell_h"])
-
-        #     # initialise `h` values
-        #     for i in range(self.k_init_h):
-        #         self.K_sqrt.setValues(
-        #             self.v_dofs, self.k_init_u + self.k_init_v + i,
-        #             Kh_vecs[:, i] * np.sqrt(self.Kh_vals[i]))
 
         # finally assemble everything
         for mat in [self.cov_sqrt, self.cov_sqrt_prev, self.cov_sqrt_pred, self.K_sqrt]:
@@ -783,9 +803,18 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         # create this matrix for later use
         # self.C = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
+
+        # setup copies of matrices
         # multiplication *after* the initial construction
-        # self.G_sqrt = self.K_sqrt.copy()
-        # M.matMult(self.K_sqrt, self.G_sqrt)
+        self.cov_sqrt_prev_pred = self.cov_sqrt_prev.copy()
+        self.cov_sqrt_prev_pred.assemblyBegin()
+        self.cov_sqrt_prev_pred.assemblyEnd()
+
+        self.G_sqrt = self.K_sqrt.copy()
+        M.mat().matMult(self.K_sqrt, self.G_sqrt)
+        self.G_sqrt.scale(np.sqrt(self.dt))
+        self.G_sqrt.assemblyBegin()
+        self.G_sqrt.assemblyEnd()
 
         # tangent linear models
         self.J_mat = fe.PETScMatrix()
@@ -809,81 +838,87 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         # TODO(connor): reuse sparsity patterns?
         self.assemble_derivatives()
 
-        # vec_extract, _ = self.J_mat.mat().getVecs()
-        # vec_solve = self.J_mat.getVecs()
-        for i in range(self.k):
-            col_prev = self.cov_sqrt_prev.getDenseColumnVec(i)
-            col_pred = self.cov_sqrt_pred.getDenseColumnVec(i)
-
-            self.J_prev_mat.mat().mult(col_prev, col_pred)
-
-            self.cov_sqrt_prev.restoreDenseColumnVec(i)
-            self.cov_sqrt_pred.restoreDenseColumnVec(i)
-
-        for i in range(self.k_init_u + self.k_init_v + self.k_init_h):
-            col_pred = self.cov_sqrt_pred.getDenseColumnVec(self.k + i)
-            col_G = self.G_sqrt.getDenseColumnVec(i)
-
-            # copy values from G into pred
-            col_G.copy(col_pred)
-            col_pred.scale(np.sqrt(self.dt))
-
-            self.cov_sqrt_pred.restoreDenseColumnVec(self.k + i)
-            self.G_sqrt.restoreDenseColumnVec(i)
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(self.cov_sqrt_pred.getDenseArray(readonly=True))
-        # plt.show()
+        # TODO(connor): this may be slow as we are copying lots of things around
+        # maybe there is a faster way to do this
+        self.J_prev_mat.mat().matMult(
+            self.cov_sqrt_prev, self.cov_sqrt_prev_pred)
+        self.cov_sqrt_pred.setValues(rows=self.local_dofs,
+                                     cols=range(0, self.k),
+                                     values=self.cov_sqrt_prev_pred.getDenseArray())
+        self.cov_sqrt_pred.setValues(rows=self.local_dofs,
+                                     cols=range(self.k, self.k + self.k_init_u + self.k_init_v + self.k_init_h),
+                                     values=self.G_sqrt.getDenseArray())
 
         # TODO(connor): this should NOT be created every iteration
-        ksp = PETSc.KSP().create()
-        # ksp.setType(PETSc.KSP.Type.GMRES)
-        # ksp.getPC().setType(PETSc.PC.Type.JACOBI)
+        ksp = PETSc.KSP().create(comm=self.comm)
         ksp.setType(PETSc.KSP.Type.PREONLY)
         ksp.getPC().setType(PETSc.PC.Type.LU)
+        ksp.getPC().setFactorSolverType("mumps")
 
         # allow command-line customization
         ksp.setFromOptions()
         ksp.setOperators(self.J_mat.mat())
 
         # and here we create the requisite objects and the like
+        vec_extract, vec_pred = self.J_mat.mat().getVecs()
         for i in range(self.k + self.k_init_u + self.k_init_v + self.k_init_h):
-            col_pred = self.cov_sqrt_pred.getDenseColumnVec(i)
-            col_pred_cpy = col_pred.copy()
-            ksp.solve(col_pred_cpy, col_pred)
-            self.cov_sqrt_pred.restoreDenseColumnVec(i)
+            self.cov_sqrt_pred.getColumnVector(i, vec_extract)
+            ksp.solve(vec_extract, vec_pred)
+            self.cov_sqrt_pred.setValues(rows=self.local_dofs, cols=i,
+                                         values=vec_pred.getArray())
 
-        # setup and solve SVD problem
-        self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred, self.C)
+        self.cov_sqrt_pred.assemble()
 
+        S = SLEPc.SVD(comm=self.comm)
+        S.create()
+        S.setOperator(self.cov_sqrt_pred)
+        S.setDimensions(nsv=self.k)
+        S.setType(S.Type.CROSS)
+        S.setCrossExplicitMatrix(True)
+        S.setFromOptions()
+        S.setUp()
+        S.solve()
+
+        nconv = S.getConverged()
+        v, u = self.cov_sqrt_pred.getVecs()
+        sigmas = np.zeros((nconv, ))
+        for i in range(nconv):
+            sigmas[i] = S.getSingularTriplet(i, u, v)
+
+        print(np.min(sigmas), np.max(sigmas))
+
+        # setup and solve EVD problem
         # setup EPS system for leading eigenvalues
-        E = SLEPc.EPS()
-        E.create()
-        E.setDimensions(nev=self.k)
-        E.setProblemType(SLEPc.EPS.ProblemType.HEP)
-        E.setOperators(self.C)
-        E.solve()
-        nconv = E.getConverged()
+        # C = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
+        # print(C.getSizes())
+        # E = SLEPc.EPS(self.comm)
+        # E.create()
+        # E.setDimensions(nev=self.k)
+        # E.setProblemType(SLEPc.EPS.ProblemType.HEP)
+        # E.setOperators(C)
+        # E.solve()
+        # nconv = E.getConverged()
+        # print(nconv)
 
-        # create matrix for values
-        self.U = PETSc.Mat().create()
-        self.U.setSizes(
-            [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k],
-            [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
-        self.U.setType("dense")
-        self.U.setUp()
-        self.U.assemblyBegin()
-        self.U.assemblyEnd()
+        # # create matrix for values
+        # self.U = PETSc.Mat().create()
+        # self.U.setSizes(
+        #     [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k],
+        #     [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
+        # self.U.setType("dense")
+        # self.U.setUp()
+        # self.U.assemblyBegin()
+        # self.U.assemblyEnd()
 
-        # create placeholder for imag. values
-        _, vi = self.C.createVecs()
-        vals = np.zeros((nconv, ), dtype=np.complex128)
-        for i in range(self.k):
-            u = self.U.getDenseColumnVec(i)
-            vals[i] = E.getEigenpair(i, u, vi)
-            self.U.restoreDenseColumnVec(i)
+        # # create placeholder for imag. values
+        # _, vi = self.C.createVecs()
+        # vals = np.zeros((nconv, ), dtype=np.complex128)
+        # for i in range(self.k):
+        #     u = self.U.getDenseColumnVec(i)
+        #     vals[i] = E.getEigenpair(i, u, vi)
+        #     self.U.restoreDenseColumnVec(i)
 
-        self.cov_sqrt_pred.matMult(self.U, result=self.cov_sqrt)
+        # self.cov_sqrt_pred.matMult(self.U, result=self.cov_sqrt)
 
     def set_prev(self):
         """ Copy values into previous matrix. """

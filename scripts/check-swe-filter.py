@@ -1,4 +1,5 @@
 import h5py
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,8 +21,8 @@ args = parser.parse_args()
 
 comm = fe.MPI.comm_world
 
-mesh = "./mesh/branson-refined.xdmf"
-# mesh = fe.RectangleMesh(comm, fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
+# mesh = "./mesh/branson.xdmf"
+mesh = fe.RectangleMesh(comm, fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
 params = dict(
     nu=1e-5, C=0., H=0.053, u_inflow=0.004, inflow_period=120)
 control = dict(
@@ -40,23 +41,24 @@ swe.setup_form()
 swe.setup_solver(use_ksp=True)
 
 # setup filter (basically compute prior additive noise covariance)
-rho = 1e-2
+rho = 1.
 ell = 1.  # characteristic lengthscale from cylinder
 stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    ell_u=ell, ell_v=ell, ell_h=0.5,
                    k_init_u=32, k_init_v=32, k_init_h=16, k=64)
 swe.setup_filter(stat_params)
 
-# t = 0.
-# t_final = 30.
-# nt = np.int32(np.round(t_final / control["dt"]))
+start_time = time.time()
+t = 0.
+t_final = 3.
+nt = np.int32(np.round(t_final / control["dt"]))
 
-# i_dat = 0
-# for i in trange(nt):
-#     t += swe.dt
-#     swe.inlet_velocity.t = t
-#     swe.prediction_step(t)
-#     swe.set_prev()
+i_dat = 0
+t += swe.dt
+swe.inlet_velocity.t = t
+swe.prediction_step(t)
+swe.set_prev()
+print(f"Took {time.time() - start_time} s to setup and step forward")
 
 #     if i % 2 == 0:
 #         assert np.isclose(t_data[i_dat], t)
