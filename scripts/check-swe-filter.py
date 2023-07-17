@@ -32,6 +32,7 @@ control = dict(
     use_imex=False,
     use_les=False)
 
+start_time = time.time()
 if args.use_numpy:
     swe = ShallowTwoFilter(mesh, params, control, comm)
 else:
@@ -42,23 +43,23 @@ swe.setup_solver(use_ksp=True)
 
 # setup filter (basically compute prior additive noise covariance)
 rho = 1.
-ell = 1.  # characteristic lengthscale from cylinder
+ell = 0.1  # characteristic lengthscale from cylinder
 stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    ell_u=ell, ell_v=ell, ell_h=0.5,
                    k_init_u=32, k_init_v=32, k_init_h=16, k=64)
 swe.setup_filter(stat_params)
+print(f"Took {time.time() - start_time} s to setup")
 
-start_time = time.time()
 t = 0.
 t_final = 3.
 nt = np.int32(np.round(t_final / control["dt"]))
 
 i_dat = 0
-t += swe.dt
-swe.inlet_velocity.t = t
-swe.prediction_step(t)
-swe.set_prev()
-print(f"Took {time.time() - start_time} s to setup and step forward")
+for i in trange(nt):
+    t += swe.dt
+    swe.inlet_velocity.t = t
+    swe.prediction_step(t)
+    swe.set_prev()
 
 #     if i % 2 == 0:
 #         assert np.isclose(t_data[i_dat], t)

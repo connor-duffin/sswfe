@@ -816,6 +816,14 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.G_sqrt.assemblyBegin()
         self.G_sqrt.assemblyEnd()
 
+        # create matrix for values
+        self.V = PETSc.Mat().create(comm=self.comm)
+        self.V.setSizes(
+            [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
+        self.V.setType("mpidense")
+        self.V.setUp()
+        self.V.assemble()
+
         # tangent linear models
         self.J_mat = fe.PETScMatrix()
         fe.assemble(self.J, tensor=self.J_mat)
@@ -867,6 +875,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             self.cov_sqrt_pred.setValues(rows=self.local_dofs, cols=i,
                                          values=vec_pred.getArray())
 
+        # setting
         self.cov_sqrt_pred.assemble()
 
         S = SLEPc.SVD(comm=self.comm)
@@ -879,46 +888,16 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         S.setUp()
         S.solve()
 
-        nconv = S.getConverged()
+        rows = self.V.getOwnershipRange()
+        V_rows = list(range(rows[0], rows[1]))
         v, u = self.cov_sqrt_pred.getVecs()
-        sigmas = np.zeros((nconv, ))
-        for i in range(nconv):
+        sigmas = np.zeros((self.k, ))
+        for i in range(self.k):
             sigmas[i] = S.getSingularTriplet(i, u, v)
+            self.V.setValues(rows=V_rows, cols=i, values=v.getArray())
 
-        print(np.min(sigmas), np.max(sigmas))
-
-        # setup and solve EVD problem
-        # setup EPS system for leading eigenvalues
-        # C = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
-        # print(C.getSizes())
-        # E = SLEPc.EPS(self.comm)
-        # E.create()
-        # E.setDimensions(nev=self.k)
-        # E.setProblemType(SLEPc.EPS.ProblemType.HEP)
-        # E.setOperators(C)
-        # E.solve()
-        # nconv = E.getConverged()
-        # print(nconv)
-
-        # # create matrix for values
-        # self.U = PETSc.Mat().create()
-        # self.U.setSizes(
-        #     [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k],
-        #     [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
-        # self.U.setType("dense")
-        # self.U.setUp()
-        # self.U.assemblyBegin()
-        # self.U.assemblyEnd()
-
-        # # create placeholder for imag. values
-        # _, vi = self.C.createVecs()
-        # vals = np.zeros((nconv, ), dtype=np.complex128)
-        # for i in range(self.k):
-        #     u = self.U.getDenseColumnVec(i)
-        #     vals[i] = E.getEigenpair(i, u, vi)
-        #     self.U.restoreDenseColumnVec(i)
-
-        # self.cov_sqrt_pred.matMult(self.U, result=self.cov_sqrt)
+        self.V.assemble()
+        self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
 
     def set_prev(self):
         """ Copy values into previous matrix. """
