@@ -5,6 +5,7 @@ import numpy as np
 import fenics as fe
 
 from scipy.linalg import cholesky, cho_factor, cho_solve, eigh
+from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import splu
 from statfenics.utils import dolfin_to_csr
 from statfenics.covariance import sq_exp_spectral_density
@@ -95,9 +96,9 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
     E.setDimensions(nev=k)
     E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
     E.setTarget(1e-14)
-    E.setTolerances(1e-12, 100000)
+    E.setTolerances(1e-12, 100_000)
     S = E.getST()
-    S.setType('sinvert')
+    S.setType("sinvert")
     E.setFromOptions()
     E.solve()
 
@@ -123,9 +124,9 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
     #     fe.inner(fe.TrialFunction(V), fe.TestFunction(V)) * fe.dx,
     #     tensor=M)
     # M = M.mat()
-    # M_scipy = csr_matrix(M.getValuesCSR()[::-1], shape=M.size)
-    # eigenvecs_scale = eigenvecs.T @ M_scipy @ eigenvecs
-    # eigenvecs = eigenvecs / np.sqrt(eigenvecs_scale.diagonal())
+    M_scipy = csr_matrix(M_no_bc.getValuesCSR()[::-1], shape=M.size)
+    eigenvecs_scale = eigenvecs.T @ M_scipy @ eigenvecs
+    eigenvecs = eigenvecs / np.sqrt(eigenvecs_scale.diagonal())
     return (laplace_eigenvals, eigenvecs)
 
 
@@ -163,7 +164,9 @@ def sq_exp_evd_hilbert(V, k=64, scale=1., ell=1., bc="Dirichlet"):
         ell=ell,
         D=V.mesh().geometric_dimension())
 
+    print(eigenvals)
     return (eigenvals, eigenvecs)
+
 
 def stress_term(u, v, nu, nu_t, laplacian=False):
     if laplacian:
@@ -730,37 +733,46 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         E.create()
         E.setOperators(A.mat(), M.mat())
 
-        E.setDimensions(nev=self.k)
+        E.setDimensions(nev=3 * self.k)
         E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
-        E.setTarget(1e-14)
-        E.setTolerances(1e-12, 100000)
+        E.setTarget(0.)
+        E.setTolerances(1e-12, 100_000)
         S = E.getST()
-        S.setType('sinvert')
+        S.setType("sinvert")
         E.setFromOptions()
         E.solve()
 
         # set up vectors for storage
         vr, vi = A.mat().getVecs()
+        wr, wi = A.mat().getVecs()
         laplace_eigenvals = np.zeros((self.k, ))
         errors = np.zeros((self.k, ))
 
         # u-eigenpairs
         for i in range(self.k_init_u):
-            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            laplace_eigenvals[i] = np.abs(np.real(E.getEigenpair(3 * i, vr, vi)))
+
+            M_no_bc.mat().mult(vr, wr)
+            weighted_norm = np.sqrt(vr.tDot(wr))
+
             spec_dens = sq_exp_spectral_density(
                 np.sqrt(laplace_eigenvals[i]),
                 scale=stat_params["rho_u"],
                 ell=stat_params["ell_u"],
                 D=2
             )
+            print(spec_dens)
             errors[i] = E.computeError(i)
             self.K_sqrt.setValues(
                 self.u_dofs, i,
-                np.sqrt(spec_dens) * vr.getValues(self.u_dofs))
+                np.sqrt(spec_dens) * vr.getValues(self.u_dofs) / weighted_norm)
 
         # v-eigenpairs
         for i in range(self.k_init_v):
-            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            laplace_eigenvals[i] = np.abs(np.real(E.getEigenpair(1 + 3 * i, vr, vi)))
+            M_no_bc.mat().mult(vr, wr)
+            weighted_norm = np.sqrt(vr.tDot(wr))
+
             errors[i] = E.computeError(i)
             spec_dens = sq_exp_spectral_density(
                 np.sqrt(laplace_eigenvals[i]),
@@ -768,13 +780,14 @@ class ShallowTwoFilterPETSc(ShallowTwo):
                 ell=stat_params["ell_v"],
                 D=2
             )
+            print(spec_dens)
             self.K_sqrt.setValues(
                 self.v_dofs, self.k_init_u + i,
-                np.sqrt(spec_dens) * vr.getValues(self.v_dofs))
+                np.sqrt(spec_dens) * vr.getValues(self.v_dofs) / weighted_norm)
 
         # h-eigenpairs
         for i in range(self.k_init_h):
-            laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
+            laplace_eigenvals[i] = np.abs(np.real(E.getEigenpair(2 + 3 * i, vr, vi)))
             spec_dens = sq_exp_spectral_density(
                 np.sqrt(laplace_eigenvals[i]),
                 scale=stat_params["rho_h"],
@@ -812,7 +825,6 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         self.G_sqrt = self.K_sqrt.copy()
         M.mat().matMult(self.K_sqrt, self.G_sqrt)
-        self.G_sqrt.scale(np.sqrt(self.dt))
         self.G_sqrt.assemblyBegin()
         self.G_sqrt.assemblyEnd()
 
@@ -855,7 +867,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
                                      values=self.cov_sqrt_prev_pred.getDenseArray())
         self.cov_sqrt_pred.setValues(rows=self.local_dofs,
                                      cols=range(self.k, self.k + self.k_init_u + self.k_init_v + self.k_init_h),
-                                     values=self.G_sqrt.getDenseArray())
+                                     values=np.sqrt(self.dt) * self.G_sqrt.getDenseArray())
 
         # TODO(connor): this should NOT be created every iteration
         ksp = PETSc.KSP().create(comm=self.comm)
