@@ -19,15 +19,10 @@ from slepc4py import SLEPc
 logger = logging.getLogger(__name__)
 
 # use default Fenics MPI comm (itself uses mpi4py)
-comm = fe.MPI.comm_world
-rank = comm.Get_rank()
+COMM_WORLD = fe.MPI.comm_world
 
 
-def boundary(x, on_boundary):
-    return on_boundary
-
-
-def laplacian_evd(V, k=64, bc="Dirichlet"):
+def laplacian_evd(comm, V, k=64, bc="Dirichlet", return_function=False):
     """
     Aproximate the smallest k eigenvalues/eigenfunctions of the Laplacian.
 
@@ -36,6 +31,9 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
 
     Parameters
     ----------
+    comm: mpi4py.MPI.COMM
+        MPI communicator on which we do the computing. Usually MPI.COMM_SELF or
+        MPI.COMM_WORLD.
     V : fenics.FunctionSpace
         FunctionSpace on which to compute the approximation.
     k : int, optional
@@ -43,6 +41,19 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
     bc : str, optional
         Boundary conditions to use in the approximation. Either 'Dirichlet' or
         'Neumann'.
+    return_function: bool, optional
+        Flag to return a list of fenics functions instead of a numpy.ndarray.
+        This allows for interpolation across different FunctionSpaces.
+
+    Returns
+    -------
+    numpy.ndarray
+        Eigenvalues of the Laplacian, computed using the FunctionSpace V.
+    numpy.ndarray : optional
+        Vector of nodal values of the eigenfunctions, computed on the
+        FunctionSpace V.
+    list : optional
+        List of eigenfunctions, defined on the FunctionSpace V.
     """
     e = V.element()
     dim = e.num_sub_elements()
@@ -68,11 +79,11 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
     v = fe.TestFunction(V)
 
     a = fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
-    A = fe.PETScMatrix()
+    A = fe.PETScMatrix(comm)
     fe.assemble(a, tensor=A)
 
-    M = fe.PETScMatrix()
-    M_no_bc = fe.PETScMatrix()
+    M = fe.PETScMatrix(comm)
+    M_no_bc = fe.PETScMatrix(comm)
     fe.assemble(fe.inner(u, v) * fe.dx, tensor=M)
     fe.assemble(fe.inner(u, v) * fe.dx, tensor=M_no_bc)
 
@@ -90,7 +101,7 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
 
     # solver inspired by: cmaurini
     # https://gist.github.com/cmaurini/6dea21fc01c6a07caeb96ff9c86dc81e
-    E = SLEPc.EPS()
+    E = SLEPc.EPS(comm)
     E.create()
     E.setOperators(A, M)
     E.setDimensions(nev=k)
@@ -110,23 +121,35 @@ def laplacian_evd(V, k=64, bc="Dirichlet"):
     vi, wi = A.getVecs()
 
     laplace_eigenvals = np.zeros((k, ))
-    eigenvecs = np.zeros((vr.array_r.shape[0], k))
     errors = np.zeros((k, ))
+
+    if return_function:
+        eigenfunctions = [fe.Function(V) for i in range(k)]
+    else:
+        eigenvecs = np.zeros((vr.array_r.shape[0], k))
 
     for i in range(k):
         laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
-        eigenvecs[:, i] = vr.array_r
         errors[i] = E.computeError(i)
 
-    M_scipy = csr_matrix(M_no_bc.getValuesCSR()[::-1], shape=M.size)
-    for i in range(k):
-        eigenvecs_scale = np.sqrt(eigenvecs[:, i].T @ M_scipy @ eigenvecs[:, i])
-        eigenvecs[:, i] /= eigenvecs_scale
+        # normalize by weighted norm on  the function space
+        M_no_bc.mult(vr, wr)
+        ef_norm = np.sqrt(wr.tDot(vr))
 
-    return (laplace_eigenvals, eigenvecs)
+        # scale by norm on the function space
+        if return_function:
+            eigenfunctions[i].vector().set_local(vr.getArray() / ef_norm)
+        else:
+            eigenvecs[:, i] = vr.array_r / ef_norm
+
+    # what are we returning
+    if return_function:
+        return (laplace_eigenvals, eigenfunctions)
+    else:
+        return (laplace_eigenvals, eigenvecs)
 
 
-def sq_exp_evd_hilbert(V, k=64, scale=1., ell=1., bc="Dirichlet"):
+def sq_exp_evd_hilbert(comm, V, k=64, scale=1., ell=1., bc="Dirichlet"):
     """
     Approximate the SqExp covariance using Hilbert-GP.
 
@@ -149,7 +172,8 @@ def sq_exp_evd_hilbert(V, k=64, scale=1., ell=1., bc="Dirichlet"):
         Boundary conditions to use in the approximation. Either 'Dirichlet' or
         'Neumann'.
     """
-    laplace_eigenvals, eigenvecs = laplacian_evd(V, k=k, bc=bc)
+    laplace_eigenvals, eigenvecs = laplacian_evd(
+        comm, V, k=k, bc=bc, return_function=False)
 
     # enforce positivity --- picks up eigenvalues that are negative
     laplace_eigenvals = laplace_eigenvals
@@ -401,6 +425,10 @@ class ShallowTwo:
             prm["nonlinear_solver"] = "snes"
             prm["snes_solver"]["line_search"] = "bt"
 
+            # optimize compilation
+            fe.parameters['form_compiler']['optimize'] = True
+            fe.parameters['form_compiler']['cpp_optimize'] = True
+
             if use_ksp:
                 # PETSc SNES linear solver: gmres + jacobi
                 prm["snes_solver"]["linear_solver"] = "gmres"
@@ -518,11 +546,13 @@ class ShallowTwoFilter(ShallowTwo):
 
         if stat_params["rho_u"] > 0.:
             self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
+                COMM_WORLD,
                 U_space,
                 self.k_init_u,
                 stat_params["rho_u"],
                 stat_params["ell_u"])
 
+            print(self.Ku_vals)
             for i in range(self.k_init_u):
                 self.K_sqrt[self.u_dofs, i] = Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i])
 
@@ -530,11 +560,13 @@ class ShallowTwoFilter(ShallowTwo):
 
         if stat_params["rho_v"] > 0.:
             self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
+                COMM_WORLD,
                 V_space,
                 self.k_init_v,
                 stat_params["rho_v"],
                 stat_params["ell_v"])
 
+            print(self.Kv_vals)
             self.K_sqrt[self.v_dofs,
                         self.k_init_u:(self.k_init_u + len(self.Kv_vals))] = (
                 Kv_vecs @ np.diag(np.sqrt(self.Kv_vals)))
@@ -542,6 +574,7 @@ class ShallowTwoFilter(ShallowTwo):
 
         if stat_params["rho_h"] > 0.:
             self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
+                COMM_WORLD,
                 self.H_space,
                 self.k_init_h,
                 stat_params["rho_h"],
@@ -552,7 +585,7 @@ class ShallowTwoFilter(ShallowTwo):
             logger.info(f"Spectral diff (h): {self.Kh_vals[-1]:.4e}, {self.Kh_vals[0]:.4e}")
 
         # multiplication *after* the initial construction
-        self.G_sqrt[:] = self.M_scipy @ self.G_sqrt
+        self.G_sqrt[:] = self.M_scipy @ self.K_sqrt
 
         try:
             self.H = stat_params["H"]
@@ -610,8 +643,7 @@ class ShallowTwoFilter(ShallowTwo):
         # TODO(connor) avoid reallocation
         D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
         D, V = D[::-1], V[:, ::-1]
-        logger.debug("Prop. variance kept in the reduction: %f",
-                     np.sum(D[0:self.k]) / np.sum(D))
+        print(f"Prop. variance kept in the reduction: {np.sum(D[0:self.k]) / np.sum(D):.6f}", )
         np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
     def update_step(self, y, compute_lml=False):
@@ -655,10 +687,28 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             raise NotImplementedError
 
         self.mean = self.du.vector().vec()
+
+        # superLU: numpy, mumps for parallelization
+        self.ksp_propagation = PETSc.KSP().create(comm=self.comm)
+        self.ksp_propagation.setType(PETSc.KSP.Type.PREONLY)
+        self.ksp_propagation.getPC().setType(PETSc.PC.Type.LU)
+        self.ksp_propagation.getPC().setFactorSolverType("mumps")
+        # self.ksp_propagation.getPC().setFactorSolverType("umfpack")
+        self.ksp_propagation.setFromOptions()
+
+        # read in and set parameters appropriately
         self.k_init_u = stat_params["k_init_u"]
         self.k_init_v = stat_params["k_init_v"]
         self.k_init_h = stat_params["k_init_h"]
         self.k = stat_params["k"]
+
+        self.rho_u = stat_params["rho_u"]
+        self.rho_v = stat_params["rho_v"]
+        self.rho_h = stat_params["rho_h"]
+
+        self.ell_u = stat_params["ell_u"]
+        self.ell_v = stat_params["ell_v"]
+        self.ell_h = stat_params["ell_h"]
 
         # setup stuff for ordering
         self.dofmap = self.W.dofmap()
@@ -672,7 +722,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.cov_sqrt = PETSc.Mat()
         self.cov_sqrt.create(comm=self.comm)
         self.cov_sqrt.setSizes([[n_dofs, n_dofs_global], self.k])
-        self.cov_sqrt.setType("dense")
+        self.cov_sqrt.setType("mpidense")
         self.cov_sqrt.setUp()
         self.cov_sqrt.setLGMap(
             lgmap,
@@ -681,7 +731,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.cov_sqrt_prev = PETSc.Mat()
         self.cov_sqrt_prev.create(comm=self.comm)
         self.cov_sqrt_prev.setSizes([[n_dofs, n_dofs_global], self.k])
-        self.cov_sqrt_prev.setType("dense")
+        self.cov_sqrt_prev.setType("mpidense")
         self.cov_sqrt_prev.setUp()
         self.cov_sqrt_prev.setLGMap(
             lgmap,
@@ -692,7 +742,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.cov_sqrt_pred.setSizes(
             [[n_dofs, n_dofs_global],
              self.k + self.k_init_u + self.k_init_v + self.k_init_h])
-        self.cov_sqrt_pred.setType("dense")
+        self.cov_sqrt_pred.setType("mpidense")
         self.cov_sqrt_pred.setUp()
         self.cov_sqrt_pred.setLGMap(
             lgmap,
@@ -703,7 +753,7 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.K_sqrt.setSizes(
             [[n_dofs, n_dofs_global],
              self.k_init_u + self.k_init_v + self.k_init_h])
-        self.K_sqrt.setType("dense")
+        self.K_sqrt.setType("mpidense")
         self.K_sqrt.setUp()
         self.K_sqrt.setLGMap(
             lgmap,
@@ -711,161 +761,13 @@ class ShallowTwoFilterPETSc(ShallowTwo):
                 [int(i) for i in range(self.k_init_u + self.k_init_v + self.k_init_h)],
                 comm=self.comm))
 
-        # NOW start eigenvalue computations: do it on the joint space
-        du = fe.TrialFunction(self.W)
-        vel, h = fe.split(du)
-        u1, u2 = fe.split(vel)
-        # test functions
-        qv = fe.TestFunction(self.W)
-        q, v = fe.split(qv)
-        q1, q2 = fe.split(q)
-
-        # setup everything
-        a = (fe.inner(fe.grad(u1), fe.grad(q1)) * fe.dx
-             + fe.inner(fe.grad(u2), fe.grad(q2)) * fe.dx
-             + fe.inner(fe.grad(h), fe.grad(v)) * fe.dx)
-        A = fe.PETScMatrix()
-        fe.assemble(a, tensor=A)
-
-        M = fe.PETScMatrix()
-        fe.assemble(fe.inner(du, qv) * fe.dx, tensor=M)
-
-        M_no_bc = fe.PETScMatrix()
-        fe.assemble(fe.inner(du, qv) * fe.dx, tensor=M_no_bc)
-
-        # sets rows of M to zeros
-        bc = fe.DirichletBC(self.W, fe.Constant((0, 0, 0)), boundary)
-        bc.apply(A)
-        bc.apply(M)
-        bc.zero(M)
-
-        E = SLEPc.EPS(comm=self.comm)
-        E.create()
-        E.setOperators(A.mat(), M.mat())
-
-        E.setDimensions(nev=3*self.k, ncv=2*3*self.k)
-        E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
-        E.setTarget(0.)
-        E.setTolerances(1e-12, 100_000)
-        S = E.getST()
-        S.setType("sinvert")
-        E.setFromOptions()
-        E.solve()
-
-        print(f"{E.getConverged()} eigenpairs converged, requested {3 * self.k}")
-
-        # set up vectors for storage
-        vr, vi = A.mat().getVecs()
-        wr, wi = A.mat().getVecs()
-        laplace_eigenvals = np.zeros((self.k, ))
-        errors = np.zeros((self.k, ))
-
-        # u-eigenpairs
-        for i in range(self.k_init_u):
-            vr.zeroEntries()
-            wr.zeroEntries()
-            eigenvals = E.getEigenpair(3 * i, vr, vi)
-
-            # zero the v-values (due to identifiability, then re-normalize)
-            vr.setValues(self.v_dofs, np.zeros_like(self.v_dofs))
-            vr.setValues(self.h_dofs, np.zeros_like(self.h_dofs))
-            vr.assemble()
-
-            print(i, f"{vr.norm():.5e}")
-            if not np.isclose(vr.norm(), 1.):
-                vr.normalize()
-                vr.assemble()
-
-            # should be positive for laplacian
-            assert np.isclose(np.imag(eigenvals), 0.)
-            laplace_eigenvals[i] = np.real(eigenvals)
-
-            M_no_bc.mat().mult(vr, wr)
-            weighted_norm = np.sqrt(vr.tDot(wr))
-
-            spec_dens = sq_exp_spectral_density(
-                np.sqrt(laplace_eigenvals[i]),
-                scale=stat_params["rho_u"],
-                ell=stat_params["ell_u"],
-                D=2
-            )
-
-            errors[i] = E.computeError(i)
-            local_vals = vr.getValues(self.u_dofs)
-            print(i, f"{np.linalg.norm(vr.array_r):.5e}")
-            self.K_sqrt.setValues(
-                self.u_dofs, i,
-                local_vals * np.sqrt(spec_dens) / weighted_norm)
-
-        # v-eigenpairs
-        for i in range(self.k_init_v):
-            vr.zeroEntries(); wr.zeroEntries()
-            laplace_eigenvals[i] = np.abs(np.real(E.getEigenpair(1 + 3 * i, vr, vi)))
-
-            # zero the u-values due to identifiability
-            vr.setValues(self.u_dofs, np.zeros_like(self.u_dofs))
-            vr.setValues(self.h_dofs, np.zeros_like(self.h_dofs))
-            vr.assemble()
-
-            vr.normalize()
-            vr.assemble()
-
-            M_no_bc.mat().mult(vr, wr)
-            weighted_norm = np.sqrt(vr.tDot(wr))
-
-            errors[i] = E.computeError(i)
-            spec_dens = sq_exp_spectral_density(
-                np.sqrt(laplace_eigenvals[i]),
-                scale=stat_params["rho_v"],
-                ell=stat_params["ell_v"],
-                D=2
-            )
-            # local_vals = np.sqrt(spec_dens) * vr.getValues(self.v_dofs)
-            local_vals = vr.getValues(self.v_dofs)
-            self.K_sqrt.setValues(
-                self.v_dofs,
-                self.k_init_u + i,
-                local_vals * np.sqrt(spec_dens) / weighted_norm)
-
-        # h-eigenpairs
-        for i in range(self.k_init_h):
-            vr.zeroEntries(); wr.zeroEntries()
-            laplace_eigenvals[i] = np.abs(np.real(E.getEigenpair(2 + 3 * i, vr, vi)))
-
-            # zero relevant entries
-            vr.setValues(self.u_dofs, np.zeros_like(self.u_dofs))
-            vr.setValues(self.v_dofs, np.zeros_like(self.v_dofs))
-            vr.assemble()
-
-            M_no_bc.mat().mult(vr, wr)
-            weighted_norm = np.sqrt(vr.tDot(wr))
-
-            spec_dens = sq_exp_spectral_density(
-                np.sqrt(laplace_eigenvals[i]),
-                scale=stat_params["rho_h"],
-                ell=stat_params["ell_h"],
-                D=2
-            )
-
-            local_vals = vr.getValues(self.h_dofs)
-            errors[i] = E.computeError(i)
-            self.K_sqrt.setValues(
-                self.h_dofs, self.k_init_u + self.k_init_v + i,
-                local_vals * np.sqrt(spec_dens) / weighted_norm)
-
-        print(f"Spectral diff (laplacian): {laplace_eigenvals[-1]:.4e}, {laplace_eigenvals[0]:.4e}")
-
         # finally assemble everything
+        self.K_sqrt.assemble()
         self.cov_sqrt.assemble()
         self.cov_sqrt_prev.assemble()
         self.cov_sqrt_pred.assemble()
-        self.K_sqrt.assemble()
 
-        # multiplication *after* the initial construction
-        self.G_sqrt = self.K_sqrt.copy()
-        M.mat().matMult(self.K_sqrt, self.G_sqrt)
-
-        # create matrix for values
+        # create matrix for SVD (later on)
         self.V = PETSc.Mat().create(comm=self.comm)
         self.V.setSizes(
             [self.k + self.k_init_u + self.k_init_v + self.k_init_h, self.k])
@@ -880,6 +782,106 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.J_prev_mat = fe.PETScMatrix()
         fe.assemble(self.J_prev, tensor=self.J_prev_mat)
 
+    def setup_prior_covariance(self):
+        """ Compute the prior covariance matrix G^(1/2).
+
+        This uses one of the velocity subspaces to compute a set of
+        eigenfunctions. Thus we only need to solve a single eigenvalue
+        sub-problem, instead of a coupled set.
+        """
+        # create subspaces, upon which we compute the eigenfunctions
+        vel_space, h_space = self.W.split()
+        U = vel_space.split()[0].collapse()
+        H = h_space.collapse()
+
+        # self.k needs to upper bound the other eigenvalues
+        assert ((self.k_init_u <= self.k)
+                and (self.k_init_v <= self.k)
+                and (self.k_init_h <= self.k))
+
+        eigenvals, eigenfunctions = laplacian_evd(
+            self.comm, U, k=self.k, return_function=True)
+
+        # zero the other values
+        zero_function = fe.Function(U)
+        zero_function.vector()[:] = 0.
+
+        # du function is the column of the covariance matrix
+        du = fe.Function(self.W)
+        assigner_vel = fe.FunctionAssigner(self.W.sub(0), [U, U])
+
+        # and we set things up as need be: u-component
+        if self.rho_u > 0.:
+            self.spec_dens_u = sq_exp_spectral_density(
+                np.sqrt(eigenvals),
+                scale=self.rho_u,
+                ell=self.ell_u,
+                D=self.mesh.geometric_dimension())
+
+            for i in range(self.k_init_u):
+                assigner_vel.assign(
+                    du.sub(0), [eigenfunctions[i], zero_function])
+
+                u, h = du.split()
+                assert np.isclose(fe.norm(h), 0.)
+
+                self.K_sqrt.setValues(
+                    self.local_dofs, i,
+                    du.vector().get_local() * np.sqrt(self.spec_dens_u[i]))
+
+        # zero entries between each: now onto the v-component
+        du.vector()[:] = 0.
+        if self.rho_v > 0.:
+            self.spec_dens_v = sq_exp_spectral_density(
+                np.sqrt(eigenvals),
+                scale=self.rho_v,
+                ell=self.ell_v,
+                D=self.mesh.geometric_dimension())
+
+            for i in range(self.k_init_v):
+                assigner_vel.assign(
+                    du.sub(0), [zero_function, eigenfunctions[i]])
+
+                u, h = du.split()
+                assert np.isclose(fe.norm(h), 0.)
+
+                self.K_sqrt.setValues(
+                    self.local_dofs, i + self.k_init_u,
+                    du.vector().get_local() * np.sqrt(self.spec_dens_v[i]))
+
+        # now onto the h-component
+        # HACK(connor): need to repeat eigenvalue computations
+        eigenvals, eigenfunctions = laplacian_evd(
+            self.comm, H, k=self.k, return_function=True)
+        assigner_h = fe.FunctionAssigner(self.W.sub(1), H)
+
+        du.vector()[:] = 0.
+        if self.rho_h > 0.:
+            self.spec_dens_h = sq_exp_spectral_density(
+                np.sqrt(eigenvals),
+                scale=self.rho_h,
+                ell=self.ell_h,
+                D=self.mesh.geometric_dimension())
+
+            for i in range(self.k_init_h):
+                assigner_h.assign(du.sub(1), eigenfunctions[i])
+
+                u, h = du.split()
+                assert np.isclose(fe.norm(u), 0.)
+
+                self.K_sqrt.setValues(
+                    self.local_dofs, i + self.k_init_u + self.k_init_v,
+                    du.vector().get_local() * np.sqrt(self.spec_dens_h[i]))
+
+        self.K_sqrt.assemble()
+
+        self.G_sqrt = self.K_sqrt.copy()
+        M = fe.PETScMatrix()
+        u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
+        fe.assemble(fe.inner(u, v) * fe.dx, tensor=M)
+        M.mat().matMult(self.K_sqrt, self.G_sqrt)
+        self.G_sqrt.assemble()
+
     def assemble_derivatives(self):
         fe.assemble(self.J, tensor=self.J_mat)
         fe.assemble(self.J_prev, tensor=self.J_prev_mat)
@@ -889,21 +891,13 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             for bc in self.bcs: bc.apply(J)
 
     def prediction_step(self, t):
+        # TODO(connor) solve seems inefficient here? should be quicker?
         self.solve()
         self.mean.setArray(self.du.vector().get_local())
 
-        # TODO(connor): reuse sparsity patterns?
+        # TODO(connor): reuse sparsity patterns
         self.assemble_derivatives()
-
-        # TODO(connor): this should NOT be created every iteration
-        ksp = PETSc.KSP().create(comm=self.comm)
-        ksp.setType(PETSc.KSP.Type.PREONLY)
-        ksp.getPC().setType(PETSc.PC.Type.LU)
-        ksp.getPC().setFactorSolverType("mumps")
-
-        # allow command-line customization
-        ksp.setFromOptions()
-        ksp.setOperators(self.J_mat.mat())
+        self.ksp_propagation.setOperators(self.J_mat.mat())
 
         # and here we create the requisite objects and the like
         vec_extract, vec_pred = self.J_mat.mat().getVecs()
@@ -917,11 +911,11 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             if i < self.k:
                 self.cov_sqrt_prev.getColumnVector(i, vec_extract)
                 self.J_prev_mat.mat().mult(vec_extract, vec_pred)
-                ksp.solve(vec_pred, vec_solve)
+                self.ksp_propagation.solve(vec_pred, vec_solve)
             else:
                 self.G_sqrt.getColumnVector(i - self.k, vec_extract)
                 vec_extract.scale(np.sqrt(self.dt))
-                ksp.solve(vec_extract, vec_solve)
+                self.ksp_propagation.solve(vec_extract, vec_solve)
 
             self.cov_sqrt_pred.setValues(rows=self.local_dofs, cols=i,
                                          values=vec_solve.getArray())
@@ -947,7 +941,6 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             sigmas[i] = S.getSingularTriplet(i, u, v)
             self.V.setValues(rows=V_rows, cols=i, values=v.getArray())
 
-        print(sigmas[0], sigmas[-1])
         self.V.assemble()
         self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
 
