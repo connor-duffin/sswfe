@@ -20,15 +20,18 @@ parser.add_argument("--use_numpy", action="store_true")
 args = parser.parse_args()
 
 comm = fe.MPI.comm_world
+rank = comm.Get_rank()
 
 # mesh = "./mesh/branson.xdmf"
-mesh = fe.RectangleMesh(comm, fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
+mesh = fe.RectangleMesh(
+    comm, fe.Point(0, 0), fe.Point(2., 1.), 32, 16)
+
 params = dict(
     nu=1e-5, C=0., H=0.053, u_inflow=0.004, inflow_period=120)
 control = dict(
-    dt=5e-2,
+    dt=1e-2,
     theta=0.5,
-    simulation="cylinder",
+    simulation="laminar",
     use_imex=False,
     use_les=False)
 
@@ -43,15 +46,20 @@ swe.setup_solver(use_ksp=True)
 
 # setup filter (basically compute prior additive noise covariance)
 rho = 1.
-ell = 0.1  # characteristic lengthscale from cylinder
-stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
-                   ell_u=ell, ell_v=ell, ell_h=0.5,
-                   k_init_u=32, k_init_v=32, k_init_h=16, k=64)
+ell = 0.25  # characteristic lengthscale from cylinder
+k = 16
+stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.1,
+                   ell_u=ell, ell_v=ell, ell_h=ell,
+                   k_init_u=k, k_init_v=k, k_init_h=k, k=2*k)
 swe.setup_filter(stat_params)
+
+if not args.use_numpy:
+    swe.setup_prior_covariance()
+
 print(f"Took {time.time() - start_time} s to setup")
 
 t = 0.
-t_final = 3.
+t_final = 1.
 nt = np.int32(np.round(t_final / control["dt"]))
 
 i_dat = 0
@@ -60,6 +68,35 @@ for i in trange(nt):
     swe.inlet_velocity.t = t
     swe.prediction_step(t)
     swe.set_prev()
+
+# get first variance of the column vector
+if args.use_numpy:
+    cov_vec = swe.cov_sqrt[:, 1]
+    cov_vec_norm = np.sqrt(cov_vec @ cov_vec)
+else:
+    cov_vec = swe.cov_sqrt.getColumnVector(1)
+    cov_vec_norm = np.sqrt(cov_vec.tDot(cov_vec))
+
+if rank == 0:
+    print("First column of covariance norm: ", cov_vec_norm)
+
+# var_v = np.sqrt(np.sum(swe.cov_sqrt.getDenseArray()**2, axis=1))
+# var_f = fe.Function(swe.W)
+# var_f.vector().set_local(var_v)
+
+# vel, h = var_f.split()
+# u, v = vel.split()
+
+# if rank == 0:
+#     im = fe.plot(u)
+#     plt.colorbar(im)
+#     plt.savefig("figures/variance-test-u-MPI.pdf")
+#     plt.close()
+
+#     im = fe.plot(h)
+#     plt.colorbar(im)
+#     plt.savefig("figures/variance-test-h-MPI.pdf")
+#     plt.close()
 
 #     if i % 2 == 0:
 #         assert np.isclose(t_data[i_dat], t)
