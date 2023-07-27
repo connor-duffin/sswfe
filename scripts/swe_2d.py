@@ -261,6 +261,7 @@ class ShallowTwo:
         self.du_vertices = np.copy(self.du.compute_vertex_values())
 
         # set parameters etc
+        self.g = params["g"]
         self.nu = params["nu"]
         self.C = params["C"]
         self.H = params["H"]
@@ -282,9 +283,10 @@ class ShallowTwo:
         self.solver = None
 
     def setup_form(self):
-        g = fe.Constant(9.8)
+        g = fe.Constant(self.g)
         nu = fe.Constant(self.nu)
         dt = fe.Constant(self.dt)
+        theta = fe.Constant(self.theta)
         C = fe.Constant(self.C)
 
         u_prev, h_prev = fe.split(self.du_prev)
@@ -310,15 +312,15 @@ class ShallowTwo:
                          - 1/2 * fe.inner((self.H + h_prev_prev) * u_prev_prev, fe.grad(v_h)) * fe.dx))  # bottom friction
         else:
             u, h = fe.split(self.du)
-            u_theta = self.theta * u + (1 - self.theta) * u_prev
-            h_theta = self.theta * h + (1 - self.theta) * h_prev
+            u_theta = theta * u + (1 - theta) * u_prev
+            h_theta = theta * h + (1 - theta) * h_prev
             u_mag = fe.sqrt(fe.inner(u_prev, u_prev) + 1e-12)  # for numerical stability
+            # C * (u_mag / (self.H + h_theta)) * fe.inner(u_theta, v_u) * fe.dx
             self.F = (fe.inner(u - u_prev, v_u) / dt * fe.dx  # mass term u
                       + g * fe.inner(fe.grad(h_theta), v_u) * fe.dx  # surface term
                       + fe.inner(fe.dot(u_theta, fe.nabla_grad(u_theta)), v_u) * fe.dx
-                      + C * (u_mag / (self.H + h_theta)) * fe.inner(u_theta, v_u) * fe.dx
                       + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
-                      - fe.inner((self.H + h_theta) * u_theta, fe.grad(v_h)) * fe.dx)  # bottom friction
+                      - fe.inner((self.H + h_theta) * u_theta, fe.grad(v_h)) * fe.dx)
 
         # laplacian/LES is used for dissipative effects
         # add in (parameterised) dissipation effects
@@ -353,8 +355,8 @@ class ShallowTwo:
 
         # TODO: option for cylinder mesh
         if self.simulation == "cylinder":
-            cylinder = ("on_boundary && x[0] >= 0.95 && x[0] <= 1.05 "
-                        + "&& x[1] >= 0.45 && x[1] <= 0.55")
+            cylinder = ("on_boundary && x[0] >= 9.5 && x[0] <= 10.5 "
+                        + "&& x[1] >= 2. && x[1] <= 3.")
             self.bcs.append(fe.DirichletBC(self.W.sub(0), no_slip, cylinder))
 
         # need to include surface integrals as we integrate by parts
@@ -368,7 +370,7 @@ class ShallowTwo:
         class RightBoundary(fe.SubDomain):
             def inside(self, x, on_boundary):
                 tol = 1e-14
-                return on_boundary and abs(x[0] - 2.) < tol
+                return on_boundary and abs(x[0] - 20.) < tol
 
         gamma_left = LeftBoundary()
         gamma_left.mark(self.boundaries, 1)  # mark with tag 1 for LHS
@@ -643,7 +645,7 @@ class ShallowTwoFilter(ShallowTwo):
         # TODO(connor) avoid reallocation
         D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
         D, V = D[::-1], V[:, ::-1]
-        print(f"Prop. variance kept in the reduction: {np.sum(D[0:self.k]) / np.sum(D):.6f}", )
+        logger.debug(f"Prop. variance kept in the reduction: {np.sum(D[0:self.k]) / np.sum(D):.6f}", )
         np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
     def update_step(self, y, compute_lml=False):

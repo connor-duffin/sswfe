@@ -12,6 +12,10 @@ logging.basicConfig(
     format='%(asctime)s - %(relativeCreated)d ms - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO)
 
+# register MPI communicator
+comm = fe.MPI.comm_world
+rank = comm.Get_rank()
+size = comm.Get_size()
 
 # set inputs etc
 parser = ArgumentParser()
@@ -23,19 +27,41 @@ parser.add_argument("--checkpoint_file", type=str)
 args = parser.parse_args()
 
 # run 8 from Paul's JFM paper
+# physical settings
+period = 120.
+nu = 1e-6
+g = 9.8
+
+# reference values
+u_ref = 0.01  # cm/s
+length_ref = 0.1  # cylinder
+time_ref = length_ref / u_ref
+H_ref = length_ref
+
+# compute reynolds number
+Re = u_ref * length_ref / nu
+
 params = dict(
-    nu=2e-6, H=0.053, C=1e-3, u_inflow=0.004, inflow_period=120)
+    nu=1 / Re,
+    g=g * H_ref / u_ref**2,
+    C=0.,
+    H=0.053 / H_ref,
+    u_inflow=0.004 / u_ref,
+    inflow_period=period / time_ref)
 control = dict(
-    dt=5e-2, theta=0.5, simulation="cylinder", use_imex=False, use_les=False)
+    dt=5e-2,
+    theta=0.5,
+    simulation="cylinder",
+    use_imex=False,
+    use_les=False)
 
-swe = ShallowTwo(mesh=args.mesh_file, params=params, control=control)
+# mesh = fe.RectangleMesh(comm, fe.Point(0, 0,), fe.Point(10, 5), 32, 16)
+swe = ShallowTwo(mesh=args.mesh_file,
+                 params=params,
+                 control=control,
+                 comm=comm)
 swe.setup_form()
-swe.setup_solver(use_ksp=True)
-
-# register MPI communicator
-comm = swe.mesh.mpi_comm()
-rank = comm.Get_rank()
-size = comm.Get_size()
+swe.setup_solver(use_ksp=False)
 
 # load datasets from checkpoints (if set)
 if args.load_from_checkpoint:
@@ -53,7 +79,7 @@ if args.load_from_checkpoint:
 else:
     t = 0.
 
-t_final = 5 * params["inflow_period"]
+t_final = 5. * params["inflow_period"]
 nt = np.int32(np.round((t_final - t) / control["dt"]))
 
 t_thin = 0.1
@@ -150,6 +176,8 @@ for i in tqdm(range(nt)):
             h_out[i_save, :] = h_recvbuf
 
         i_save += 1
+
+    swe.set_prev()
 
 if args.write_checkpoint:
     swe.checkpoint_close()

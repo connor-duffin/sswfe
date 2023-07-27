@@ -10,20 +10,20 @@ parser.add_argument("--refine", action="store_true")
 parser.add_argument("--popup", action="store_true")
 args = parser.parse_args()
 
-cm = 1e-2
+# cm = 1e-2
 # domain_width = 0.41
 # domain_length = 2.2
-domain_width = 1.
-domain_length = 2.
+domain_width = 5.
+domain_length = 20.
 
 # cylinder setup
-cyl_diameter = 0.1
+cyl_diameter = 1.
 cyl_radius = cyl_diameter / 2
 cyl_center = [domain_length / 2, domain_width / 2]
 
 gmsh.initialize()
 gmsh.model.add("channel")
-h = cyl_diameter / 8
+h = cyl_diameter / 10
 
 factory = gmsh.model.occ
 factory.addPoint(0., 0., 0, h, 1)
