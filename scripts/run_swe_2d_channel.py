@@ -42,18 +42,18 @@ H_ref = length_ref
 Re = u_ref * length_ref / nu
 
 params = dict(
-    nu=1 / Re,
-    g=g * H_ref / u_ref**2,
-    C=0.,
-    H=0.053 / H_ref,
+    nu=1 / re,
+    g=g * h_ref / u_ref**2,
+    c=0.,
+    h=0.053 / h_ref,
     u_inflow=0.004 / u_ref,
     inflow_period=period / time_ref)
 control = dict(
     dt=5e-2,
     theta=0.5,
     simulation="cylinder",
-    use_imex=False,
-    use_les=False)
+    use_imex=false,
+    use_les=false)
 
 # mesh = fe.RectangleMesh(comm, fe.Point(0, 0,), fe.Point(10, 5), 32, 16)
 swe = ShallowTwo(mesh=args.mesh_file,

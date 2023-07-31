@@ -1,26 +1,31 @@
 import h5py
-import time
+import logging
 
 import numpy as np
-import matplotlib.pyplot as plt
 import fenics as fe
 
 from argparse import ArgumentParser
 from tqdm import trange
-from numpy.testing import assert_allclose
 from scipy.sparse import vstack
 
-from swe_2d import ShallowTwoFilter, ShallowTwoFilterPETSc
+from swfe.swe_2d import ShallowTwoFilter
 from statfenics.utils import build_observation_operator
-
-fe.set_log_level(50)
-
-parser = ArgumentParser()
-parser.add_argument("--use_numpy", action="store_true")
-args = parser.parse_args()
 
 comm = fe.MPI.comm_world
 rank = comm.Get_rank()
+size = comm.Get_size()
+
+# get command line arguments
+parser = ArgumentParser()
+parser.add_argument("output_file", type=str)
+parser.add_argument("--log_file", type=str, default="swe-filter-run.log")
+args = parser.parse_args()
+
+# setup logging
+logging.basicConfig(filename=args.log_file,
+                    encoding="utf-8",
+                    level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # physical settings
 period = 120.
@@ -36,124 +41,149 @@ H_ref = length_ref
 # compute reynolds number
 Re = u_ref * length_ref / nu
 
-mesh = fe.RectangleMesh(
-    comm, fe.Point(0, 0), fe.Point(10., 5.), 32, 16)
-
+# set parameters
 params = dict(
-    nu=1 / Re,
+    nu=2 / Re,
     g=g * length_ref / u_ref**2,
     C=0.,
     H=0.053 / H_ref,
     u_inflow=0.004 / u_ref,
     inflow_period=period / time_ref)
+logger.info("Inflow: %.4f, Re: %.2f", params["u_inflow"], Re)
+
+# and numerical settings
 control = dict(
-    dt=1e-2,
+    dt=5e-2,
     theta=0.5,
     simulation="laminar",
     use_imex=False,
     use_les=False)
+sigma_y = 0.05 * params["u_inflow"]
 
-print(params["u_inflow"], params["H"])
-start_time = time.time()
-if args.use_numpy:
-    swe = ShallowTwoFilter(mesh, params, control, comm)
-else:
-    swe = ShallowTwoFilterPETSc(mesh, params, control, comm)
+# and setup filters as needed
+mesh_file = "mesh/branson-mesh-nondim.xdmf"
+swe = ShallowTwoFilter(mesh_file, params, control, comm)
 
+# setup appropriate FEM things
 swe.setup_form()
-swe.setup_solver(use_ksp=True)
+swe.setup_solver(use_ksp=False)
+
+# setup the data read-in
+data_file = "data/run-8-synthetic-data-nondim.h5"
+with h5py.File(data_file, "r") as f:
+    t_data = f["t"][:]
+    x_data = f["x"][:]
+    u_data = f["u"][:]
+    v_data = f["v"][:]
+
+spatial_obs_freq = 20
+mask_obs = x_data[:, 0] >= 13.
+x_obs = x_data[mask_obs, :][::spatial_obs_freq]
+
+Hu = build_observation_operator(x_obs, swe.W, sub=(0, 0))
+Hv = build_observation_operator(x_obs, swe.W, sub=(0, 1))
+H = vstack((Hu, Hv))
+logger.info("Observation operator shape is %s", H.shape)
 
 # setup filter (basically compute prior additive noise covariance)
-rho = 1e-2  # approx 1% of the state should be off
+rho = 1e-3  # approx 1% of the state should be off
 ell = 2.  # characteristic lengthscale from cylinder
-k = 16
-stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.1,
+k_approx = 32
+k_full = 100
+stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    ell_u=ell, ell_v=ell, ell_h=ell,
-                   k_init_u=k, k_init_v=k, k_init_h=k, k=2*k)
+                   k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full,
+                   H=H, sigma_y=sigma_y)
 swe.setup_filter(stat_params)
 
-if not args.use_numpy:
-    swe.setup_prior_covariance()
-
-print(f"Took {time.time() - start_time} s to setup")
-
 t = 0.
-t_final = 0.1
+t_final = 5 * period / time_ref
 nt = np.int32(np.round(t_final / control["dt"]))
+
+checkpoint_interval = 10
+output = h5py.File(args.output_file, mode="w")
+t_checkpoint = output.create_dataset(
+    "t_checkpoint", shape=(1, ))
+mean_checkpoint = output.create_dataset(
+    "mean_checkpoint", shape=swe.mean.shape)
+cov_sqrt_checkpoint = output.create_dataset(
+    "cov_sqrt_checkpoint", shape=swe.cov_sqrt.shape)
+
+obs_interval = 2
+nt_obs = len([i for i in range(nt) if i % obs_interval == 0])
+
+ts = np.zeros((nt, ))
+means = np.zeros((nt, swe.mean.shape[0]))
+variances = np.zeros((nt, swe.mean.shape[0]))
+eff_rank = np.zeros((nt, ))
+
+lml = np.zeros((nt_obs, ))
+rmse = np.zeros((nt_obs, ))
 
 i_dat = 0
 for i in trange(nt):
     t += swe.dt
     swe.inlet_velocity.t = t
-    swe.prediction_step(t)
+
+    # push models forward
+    try:
+        swe.prediction_step(t)
+        eff_rank[i] = swe.eff_rank
+        logger.info("Effective rank: %.5f", swe.eff_rank)
+    except Exception as e:
+        t_checkpoint[:] = t
+        mean_checkpoint[:] = swe.mean
+        cov_sqrt_checkpoint[:] = swe.cov_sqrt
+        logger.error("Failed at time %t:.5f, exiting...", t)
+        break
+
+    if i % obs_interval == 0:
+        assert np.isclose(t_data[i_dat], t)
+        y_obs = np.concatenate((u_data[i_dat, mask_obs][::spatial_obs_freq],
+                                v_data[i_dat, mask_obs][::spatial_obs_freq]))
+
+        # assimilate data
+        try:
+            lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
+            rmse[i_dat] = (
+                np.linalg.norm(y_obs - H @ swe.du.vector().get_local())
+                / np.sqrt(len(y_obs)))
+            logger.info("t = %.5f, rmse = %.5e", t, rmse[i_dat])
+        except Exception as e:
+            t_checkpoint[:] = t
+            mean_checkpoint[:] = swe.mean
+            cov_sqrt_checkpoint[:] = swe.cov_sqrt
+            logger.error("Failed at time %t:.5f, exiting...", t)
+            break
+        i_dat += 1
+
+    # checkpoint every so often
+    if i % checkpoint_interval:
+        t_checkpoint[:] = t
+        mean_checkpoint[:] = swe.mean
+        cov_sqrt_checkpoint[:] = swe.cov_sqrt
+
+    # and store things for outputs
+    ts[i] = t
+    means[i, :] = swe.du.vector().get_local()
+    variances[i, :] = np.sum(swe.cov_sqrt**2, axis=1)
     swe.set_prev()
 
-# get first variance of the column vector
-if args.use_numpy:
-    cov_vec = swe.cov_sqrt[:, 1]
-    cov_vec_norm = np.sqrt(cov_vec @ cov_vec)
-else:
-    cov_vec = swe.cov_sqrt.getColumnVector(1)
-    cov_vec_norm = np.sqrt(cov_vec.tDot(cov_vec))
+# store all outputs storage
+logger.info("now saving output to %s", args.output_file)
+metadata = {**params, **control, **stat_params}
+for name, val in metadata.items():
+    if name == "H":
+        # don't create H, just store x-outputs
+        output.attrs.create("x_obs", x_obs)
+        output.attrs.create("observed_vars", ("u", "v"))
+    else:
+        # store values into wherever
+        output.attrs.create(name, val)
 
-if rank == 0:
-    print("First column of covariance norm: ", cov_vec_norm)
-
-# var_v = np.sqrt(np.sum(swe.cov_sqrt.getDenseArray()**2, axis=1))
-# var_f = fe.Function(swe.W)
-# var_f.vector().set_local(var_v)
-
-# vel, h = var_f.split()
-# u, v = vel.split()
-
-# if rank == 0:
-#     im = fe.plot(u)
-#     plt.colorbar(im)
-#     plt.savefig("figures/variance-test-u-MPI.pdf")
-#     plt.close()
-
-#     im = fe.plot(h)
-#     plt.colorbar(im)
-#     plt.savefig("figures/variance-test-h-MPI.pdf")
-#     plt.close()
-
-#     if i % 2 == 0:
-#         assert np.isclose(t_data[i_dat], t)
-#         y_obs = np.concatenate((u_data[i_dat, mask_obs][::20], 
-#                                 v_data[i_dat, mask_obs][::20]))
-#         swe.update_step(y_obs, compute_lml=False)
-#         i_dat += 1
-
-# data_file = "data/run-8-synthetic-data.h5"
-
-# with h5py.File(data_file, "r") as f:
-#     t_data = f["t"][:]
-#     x_data = f["x"][:]
-#     u_data = f["u"][:]
-#     v_data = f["v"][:]
-
-# mask_obs = x_data[:, 0] >= 1.3
-# x_obs = x_data[mask_obs, :][::20]
-# print(x_obs.shape)
-
-# Hu = build_observation_operator(x_obs, swe.W, sub=(0, 0))
-# Hv = build_observation_operator(x_obs, swe.W, sub=(0, 1))
-# H = vstack((Hu, Hv))
-# print(H.shape)
-# as on the same fcn space
-# assert_allclose(swe.Ku_vals, swe.Kv_vals)
-
-# plt.semilogy(swe.Ku_vals, ".-", label="$u$")
-# plt.semilogy(swe.Kv_vals, ".-", label="$v$")
-# plt.legend()
-# plt.show()
-
-# vel, h = swe.du.split()
-# u, v = vel.split()
-
-# fe.plot(u)
-# plt.show()
-
-# im = fe.plot(v)
-# plt.colorbar(im)
-# plt.show()
+output.create_dataset("t", data=ts)
+output.create_dataset("mean", data=means)
+output.create_dataset("variance", data=variances)
+output.create_dataset("rmse", data=rmse)
+output.create_dataset("lml", data=lml)
+output.close()
