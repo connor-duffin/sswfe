@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "swfe"
+version = "0.0.1"
+authors = [
+  { name="Connor Duffin", email="cpd32@cam.ac.uk" },
+]
+description = "statFEM simulations for shallow water equations"
+readme = "README.md"
+license = { file="LICENSE" }
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/connor-duffin/swfe"
+"Bug Tracker" = "https://github.com/connor-duffin/swfe/issues"

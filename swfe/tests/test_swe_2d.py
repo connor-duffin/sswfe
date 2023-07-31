@@ -4,7 +4,7 @@ import numpy as np
 import fenics as fe
 
 from numpy.testing import assert_allclose
-from swe_2d import ShallowTwo, ShallowTwoFilter
+from swfe.swe_2d import ShallowTwo, ShallowTwoFilter
 from scipy.sparse.linalg import spsolve
 from statfenics.utils import dolfin_to_csr
 
@@ -12,14 +12,22 @@ from statfenics.utils import dolfin_to_csr
 @pytest.fixture
 def swe_2d():
     mesh = fe.RectangleMesh(fe.Point(0., 0.), fe.Point(2., 1.), 32, 16)
-    params = {"nu": 1e-2, "C": 0., "H": 0.05, "u_inflow": 0.1, "inflow_period": 120}
-    control = {"dt": 0.01, "theta": 0.5, "simulation": "laminar", "use_imex": False, "use_les": False}
+    params = dict(nu=1e-2, C=0., H=0.05, g=9.8,
+                  u_inflow=0.1, inflow_period=120.,
+                  length=2., width=1.)
+    control = dict(dt=0.01,
+                   theta=0.5,
+                   simulation="laminar",
+                   use_imex=False,
+                   use_les=False)
+    # params = {"nu": 1e-2, "C": 0., "H": 0.05, "g": 9.8, "u_inflow": 0.1, "inflow_period": 120}
+    # control = {"dt": 0.01, "theta": 0.5, "simulation": "laminar", "use_imex": False, "use_les": False}
     return ShallowTwo(mesh, params, control)
 
 
 def test_shallowtwo_init(swe_2d):
-    assert swe_2d.L == 2.
-    assert swe_2d.B == 1.
+    assert swe_2d.length == 2.
+    assert swe_2d.width == 1.
 
     assert swe_2d.nu == 0.01
     assert swe_2d.C == 0.
@@ -58,8 +66,8 @@ def test_shallowtwo_ss(swe_2d):
 
 
 def test_shallowtwo_jac_bc(swe_2d):
-    assert swe_2d.L == 2.
-    assert swe_2d.B == 1.
+    assert swe_2d.length == 2.
+    assert swe_2d.width == 1.
 
     swe_2d.setup_form()
     swe_2d.setup_solver()
@@ -123,7 +131,9 @@ def test_shallowtwo_save(swe_2d):
 def test_shallowtwo_filter():
     mesh = fe.RectangleMesh(fe.Point(0., 0.),
                             fe.Point(2., 1.), 32, 16)
-    params = {"nu": 1e-2, "C": 0., "H": 0.05, "u_inflow": 0.004, "inflow_period": 120}
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "g": 9.8,
+              "u_inflow": 0.004, "inflow_period": 120,
+              "length": 2., "width": 1.}
     control = {"dt": 0.01,
                "theta": 0.5,
                "simulation": "laminar",
@@ -133,8 +143,8 @@ def test_shallowtwo_filter():
     swe.setup_form()
     swe.setup_solver()
 
-    assert swe.L == 2.
-    assert swe.B == 1.
+    assert swe.length == 2.
+    assert swe.width == 1.
 
     # check that all the dofs line up
     assert_allclose(np.unique(swe.W.dofmap().dofs()),

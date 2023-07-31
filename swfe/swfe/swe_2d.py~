@@ -5,11 +5,13 @@ import numpy as np
 import fenics as fe
 
 from scipy.linalg import cholesky, cho_factor, cho_solve, eigh
-from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import splu
 from statfenics.utils import dolfin_to_csr
-from statfenics.covariance import sq_exp_spectral_density
-from swe_les import LES
+from statfenics.covariance import (laplacian_evd,
+                                   sq_exp_evd_hilbert,
+                                   sq_exp_spectral_density)
+
+from swfe.swe_les import LES
 
 # for parallelisation
 from petsc4py import PETSc
@@ -20,170 +22,6 @@ logger = logging.getLogger(__name__)
 
 # use default Fenics MPI comm (itself uses mpi4py)
 COMM_WORLD = fe.MPI.comm_world
-
-
-def laplacian_evd(comm, V, k=64, bc="Dirichlet", return_function=False):
-    """
-    Aproximate the smallest k eigenvalues/eigenfunctions of the Laplacian.
-
-    I.e. solve u_xx + u_yy + u_zz + ... = - lambda u,
-    using shift-invert mode in SLEPc for scalable computations.
-
-    Parameters
-    ----------
-    comm: mpi4py.MPI.COMM
-        MPI communicator on which we do the computing. Usually MPI.COMM_SELF or
-        MPI.COMM_WORLD.
-    V : fenics.FunctionSpace
-        FunctionSpace on which to compute the approximation.
-    k : int, optional
-        Number of modes to take in the approximation.
-    bc : str, optional
-        Boundary conditions to use in the approximation. Either 'Dirichlet' or
-        'Neumann'.
-    return_function: bool, optional
-        Flag to return a list of fenics functions instead of a numpy.ndarray.
-        This allows for interpolation across different FunctionSpaces.
-
-    Returns
-    -------
-    numpy.ndarray
-        Eigenvalues of the Laplacian, computed using the FunctionSpace V.
-    numpy.ndarray : optional
-        Vector of nodal values of the eigenfunctions, computed on the
-        FunctionSpace V.
-    list : optional
-        List of eigenfunctions, defined on the FunctionSpace V.
-    """
-    e = V.element()
-    dim = e.num_sub_elements()
-
-    def boundary(x, on_boundary):
-        return on_boundary
-
-    bc_types = ["Dirichlet", "Neumann"]
-    if bc not in bc_types:
-        raise ValueError("Invalid bc, expected one of {bc_types}")
-    elif bc == "Dirichlet":
-        if dim == 0:
-            bc = fe.DirichletBC(V, fe.Constant(0), boundary)
-        elif dim == 2:
-            bc = fe.DirichletBC(V, fe.Constant((0, 0, 0)), boundary)
-        else:
-            raise NotImplementedError
-    else:
-        bc = None
-
-    # define variational problem
-    u = fe.TrialFunction(V)
-    v = fe.TestFunction(V)
-
-    a = fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
-    A = fe.PETScMatrix(comm)
-    fe.assemble(a, tensor=A)
-
-    M = fe.PETScMatrix(comm)
-    M_no_bc = fe.PETScMatrix(comm)
-    fe.assemble(fe.inner(u, v) * fe.dx, tensor=M)
-    fe.assemble(fe.inner(u, v) * fe.dx, tensor=M_no_bc)
-
-    if bc is not None:
-        # sets BC rows of A to identity
-        bc.apply(A)
-
-        # sets rows of M to zeros
-        bc.apply(M)
-        bc.zero(M)
-
-    M = M.mat()
-    M_no_bc = M_no_bc.mat()
-    A = A.mat()
-
-    # solver inspired by: cmaurini
-    # https://gist.github.com/cmaurini/6dea21fc01c6a07caeb96ff9c86dc81e
-    E = SLEPc.EPS(comm)
-    E.create()
-    E.setOperators(A, M)
-    E.setDimensions(nev=k)
-    E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
-    E.setTarget(0)
-    E.setTolerances(1e-12, 100_000)
-    S = E.getST()
-    S.setType("sinvert")
-    E.setFromOptions()
-    E.solve()
-
-    # check that things have converged
-    logger.info("Eigenvalues converged: %d", E.getConverged())
-
-    # and set up objects for storage
-    vr, wr = A.getVecs()
-    vi, wi = A.getVecs()
-
-    laplace_eigenvals = np.zeros((k, ))
-    errors = np.zeros((k, ))
-
-    if return_function:
-        eigenfunctions = [fe.Function(V) for i in range(k)]
-    else:
-        eigenvecs = np.zeros((vr.array_r.shape[0], k))
-
-    for i in range(k):
-        laplace_eigenvals[i] = np.real(E.getEigenpair(i, vr, vi))
-        errors[i] = E.computeError(i)
-
-        # normalize by weighted norm on  the function space
-        M_no_bc.mult(vr, wr)
-        ef_norm = np.sqrt(wr.tDot(vr))
-
-        # scale by norm on the function space
-        if return_function:
-            eigenfunctions[i].vector().set_local(vr.getArray() / ef_norm)
-        else:
-            eigenvecs[:, i] = vr.array_r / ef_norm
-
-    # what are we returning
-    if return_function:
-        return (laplace_eigenvals, eigenfunctions)
-    else:
-        return (laplace_eigenvals, eigenvecs)
-
-
-def sq_exp_evd_hilbert(comm, V, k=64, scale=1., ell=1., bc="Dirichlet"):
-    """
-    Approximate the SqExp covariance using Hilbert-GP.
-
-    For full details:
-    Solin, A., Särkkä, S., 2020. Hilbert space methods for reduced-rank
-    Gaussian process regression. Stat Comput 30, 419–446.
-    https://doi.org/10.1007/s11222-019-09886-w
-
-    Parameters
-    ----------
-    V : fenics.FunctionSpace
-        FunctionSpace on which to compute the approximation.
-    k : int, optional
-        Number of modes to take in the approximation.
-    scale : float
-        Variance hyperparameter.
-    ell : float
-        Length-scale hyperparameter.
-    bc : str, optional
-        Boundary conditions to use in the approximation. Either 'Dirichlet' or
-        'Neumann'.
-    """
-    laplace_eigenvals, eigenvecs = laplacian_evd(
-        comm, V, k=k, bc=bc, return_function=False)
-
-    # enforce positivity --- picks up eigenvalues that are negative
-    laplace_eigenvals = laplace_eigenvals
-    logger.info("Laplacian eigenvalues: %s", laplace_eigenvals)
-    eigenvals = sq_exp_spectral_density(
-        np.sqrt(laplace_eigenvals),
-        scale=scale,
-        ell=ell,
-        D=V.mesh().geometric_dimension())
-    return (eigenvals, eigenvecs)
 
 
 def stress_term(u, v, nu, nu_t, laplacian=False):
@@ -554,7 +392,6 @@ class ShallowTwoFilter(ShallowTwo):
                 stat_params["rho_u"],
                 stat_params["ell_u"])
 
-            print(self.Ku_vals)
             for i in range(self.k_init_u):
                 self.K_sqrt[self.u_dofs, i] = Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i])
 
@@ -568,7 +405,6 @@ class ShallowTwoFilter(ShallowTwo):
                 stat_params["rho_v"],
                 stat_params["ell_v"])
 
-            print(self.Kv_vals)
             self.K_sqrt[self.v_dofs,
                         self.k_init_u:(self.k_init_u + len(self.Kv_vals))] = (
                 Kv_vecs @ np.diag(np.sqrt(self.Kv_vals)))
@@ -645,7 +481,12 @@ class ShallowTwoFilter(ShallowTwo):
         # TODO(connor) avoid reallocation
         D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
         D, V = D[::-1], V[:, ::-1]
-        logger.debug(f"Prop. variance kept in the reduction: {np.sum(D[0:self.k]) / np.sum(D):.6f}", )
+        self.eff_rank = (
+            np.sum(np.sqrt(np.abs(D[0:self.k])))**2
+            / np.sum(np.abs(D[0:self.k])))
+        logger.info(
+            "Prop. variance kept in reduction: %.5f",
+            np.sum(D[0:self.k]) / np.sum(D))
         np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
     def update_step(self, y, compute_lml=False):
@@ -660,6 +501,7 @@ class ShallowTwoFilter(ShallowTwo):
         self.S_inv_HL[:] = cho_solve(S_chol, self.HL)
 
         self.mean += self.cov_sqrt @ self.HL.T @ self.S_inv_y
+        # TODO(connor): change to SVD for stability?
         self.R[:] = cholesky(
             np.eye(self.HL.shape[1]) - self.HL.T @ self.S_inv_HL, lower=True)
         self.cov_sqrt[:] = self.cov_sqrt @ self.R
