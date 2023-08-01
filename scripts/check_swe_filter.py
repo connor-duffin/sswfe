@@ -18,6 +18,7 @@ size = comm.Get_size()
 # get command line arguments
 parser = ArgumentParser()
 parser.add_argument("output_file", type=str)
+parser.add_argument("--compute_posterior", action="store_true")
 parser.add_argument("--log_file", type=str, default="swe-filter-run.log")
 args = parser.parse_args()
 
@@ -26,6 +27,10 @@ logging.basicConfig(filename=args.log_file,
                     encoding="utf-8",
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# set the files
+MESH_FILE = "mesh/branson-mesh-nondim.xdmf"
+DATA_FILE = "data/run-8-synthetic-data-nondim.h5"
 
 # physical settings
 period = 120.
@@ -47,6 +52,10 @@ params = dict(
     g=g * length_ref / u_ref**2,
     C=0.,
     H=0.053 / H_ref,
+    length=20.,
+    width=5.,
+    cylinder_centre=(10, 2.5),
+    cylinder_radius=0.5,
     u_inflow=0.004 / u_ref,
     inflow_period=period / time_ref)
 logger.info("Inflow: %.4f, Re: %.2f", params["u_inflow"], Re)
@@ -58,43 +67,46 @@ control = dict(
     simulation="laminar",
     use_imex=False,
     use_les=False)
-sigma_y = 0.05 * params["u_inflow"]
 
-# and setup filters as needed
-mesh_file = "mesh/branson-mesh-nondim.xdmf"
-swe = ShallowTwoFilter(mesh_file, params, control, comm)
-
-# setup appropriate FEM things
+# and setup filters and appropriate FEM stuff
+swe = ShallowTwoFilter(MESH_FILE, params, control, comm)
 swe.setup_form()
 swe.setup_solver(use_ksp=False)
 
 # setup the data read-in
-data_file = "data/run-8-synthetic-data-nondim.h5"
-with h5py.File(data_file, "r") as f:
+with h5py.File(DATA_FILE, "r") as f:
     t_data = f["t"][:]
     x_data = f["x"][:]
     u_data = f["u"][:]
     v_data = f["v"][:]
 
 spatial_obs_freq = 20
-mask_obs = x_data[:, 0] >= 13.
+mask_obs = np.logical_and(x_data[:, 0] >= 11, x_data[:, 0] <= 13.)
 x_obs = x_data[mask_obs, :][::spatial_obs_freq]
+nx_obs = x_obs.shape[0]
+assert x_obs.shape[1] == 2
 
 Hu = build_observation_operator(x_obs, swe.W, sub=(0, 0))
 Hv = build_observation_operator(x_obs, swe.W, sub=(0, 1))
-H = vstack((Hu, Hv))
+H = vstack((Hu, Hv), format="csr")
 logger.info("Observation operator shape is %s", H.shape)
 
 # setup filter (basically compute prior additive noise covariance)
-rho = 1e-3  # approx 1% of the state should be off
+rho = 1e-2  # approx 1% of the state should be off
 ell = 2.  # characteristic lengthscale from cylinder
 k_approx = 32
 k_full = 100
 stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    ell_u=ell, ell_v=ell, ell_h=ell,
                    k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full,
-                   H=H, sigma_y=sigma_y)
+                   H=H, sigma_y=0.05 * params["u_inflow"])
 swe.setup_filter(stat_params)
+
+# checking things are sound
+np.testing.assert_allclose(swe.mean[swe.u_dofs], 0.)
+np.testing.assert_allclose(swe.mean[swe.v_dofs], 0.)
+np.testing.assert_allclose(swe.mean[swe.h_dofs], 0.)
+np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
 
 t = 0.
 t_final = 5 * period / time_ref
@@ -117,8 +129,14 @@ means = np.zeros((nt, swe.mean.shape[0]))
 variances = np.zeros((nt, swe.mean.shape[0]))
 eff_rank = np.zeros((nt, ))
 
-lml = np.zeros((nt_obs, ))
 rmse = np.zeros((nt_obs, ))
+y = np.zeros((nt, H.shape[0]))
+
+if args.compute_posterior:
+    lml = np.zeros((nt_obs, ))
+    logger.info("Starting posterior computations...")
+else:
+    logger.info("Starting prior computations...")
 
 i_dat = 0
 for i in trange(nt):
@@ -141,10 +159,13 @@ for i in trange(nt):
         assert np.isclose(t_data[i_dat], t)
         y_obs = np.concatenate((u_data[i_dat, mask_obs][::spatial_obs_freq],
                                 v_data[i_dat, mask_obs][::spatial_obs_freq]))
+        y[i_dat, :] = y_obs
 
         # assimilate data
         try:
-            lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
+            if args.compute_posterior:
+                lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
+
             rmse[i_dat] = (
                 np.linalg.norm(y_obs - H @ swe.du.vector().get_local())
                 / np.sqrt(len(y_obs)))
@@ -184,6 +205,10 @@ for name, val in metadata.items():
 output.create_dataset("t", data=ts)
 output.create_dataset("mean", data=means)
 output.create_dataset("variance", data=variances)
+output.create_dataset("eff_rank", data=eff_rank)
 output.create_dataset("rmse", data=rmse)
-output.create_dataset("lml", data=lml)
+
+if args.compute_posterior:
+    output.create_dataset("lml", data=lml)
+
 output.close()

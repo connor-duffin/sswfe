@@ -452,8 +452,10 @@ class ShallowTwoFilter(ShallowTwo):
                 "Obs. operator and noise not parsed: setup for prior run ONLY")
 
         # tangent linear models
-        self.J_mat = fe.assemble(self.J)
-        self.J_prev_mat = fe.assemble(self.J_prev)
+        self.J_mat = fe.PETScMatrix()
+        fe.assemble(self.J, tensor=self.J_mat)
+        self.J_prev_mat = fe.PETScMatrix()
+        fe.assemble(self.J_prev, tensor=self.J_prev_mat)
 
         self.J_scipy = dolfin_to_csr(self.J_mat)
         self.J_prev_scipy = dolfin_to_csr(self.J_prev_mat)
@@ -462,8 +464,8 @@ class ShallowTwoFilter(ShallowTwo):
         self.J_scipy_lu = splu(self.J_scipy.tocsc())
 
     def assemble_derivatives(self):
-        self.J_mat = fe.assemble(self.J)
-        self.J_prev_mat = fe.assemble(self.J_prev)
+        fe.assemble(self.J, tensor=self.J_mat)
+        fe.assemble(self.J_prev, tensor=self.J_prev_mat)
 
         # set things up appropriately
         for J in [self.J_mat, self.J_prev_mat]:
