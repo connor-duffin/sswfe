@@ -6,7 +6,12 @@ import fenics as fe
 from numpy.testing import assert_allclose
 from swfe.swe_2d import ShallowTwo, ShallowTwoFilter
 from scipy.sparse.linalg import spsolve
-from statfenics.utils import dolfin_to_csr
+from statfenics.utils import dolfin_to_csr, build_observation_operator
+
+
+def rmse(y_est, y):
+    n_obs = len(y)
+    return np.linalg.norm(y_est - y, ord=2) / np.sqrt(n_obs)
 
 
 @pytest.fixture
@@ -195,3 +200,79 @@ def test_shallowtwo_filter():
         bc_dofs = np.array(global_space.dofmap().dofs())[dofs]
 
         assert_allclose(K[bc_dofs, bc_dofs], 0., atol=1e-12)
+
+
+def test_shallowtwo_filter_conditioning():
+    np.random.seed(27)
+    mesh = fe.RectangleMesh(fe.Point(0., 0.),
+                            fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "g": 9.8,
+              "u_inflow": 0.004, "inflow_period": 120,
+              "length": 2., "width": 1.}
+    control = {"dt": 0.01,
+               "theta": 0.5,
+               "simulation": "laminar",
+               "use_imex": False,
+               "use_les": False}
+    swe = ShallowTwoFilter(mesh, params, control)
+    swe.setup_form()
+    swe.setup_solver()
+
+    # check setup
+    assert swe.length == 2.
+    assert swe.width == 1.
+
+    # observe every 10th point + sanity check
+    x_obs = swe.x_coords[::10]
+    H = build_observation_operator(x_obs, swe.W, sub=(1,), out="scipy")
+    assert x_obs.shape[1] == 2
+    assert H.shape[0] == x_obs.shape[0]
+    assert H.shape[1] == len(swe.W.tabulate_dof_coordinates())
+
+    # setup filter: noise is approx 5% of state magnitude
+    rho = 1e-4
+    ell = 0.25
+    stat_params = dict(rho_u=rho, rho_v=rho, rho_h=rho,
+                       ell_u=ell, ell_v=ell, ell_h=ell,
+                       k_init_u=16, k_init_v=16, k_init_h=16, k=64,
+                       H=H, sigma_y=0.01 * params["u_inflow"])
+    swe.setup_filter(stat_params)
+
+    # increment forward SLIGHTLY! otherwise useless
+    t = swe.dt
+    swe.inlet_velocity.t = t
+    swe.prediction_step(t)
+
+    u, v, h = swe.get_vertex_values()
+    y_denoised = h[::10]
+    y = (y_denoised
+         + stat_params["sigma_y"] * np.random.normal(size=y_denoised.shape))
+    np.testing.assert_allclose(H @ swe.mean, y_denoised)
+
+    # check that normal updating is OK
+    mean_pred = swe.mean.copy()
+    cov_sqrt_pred = swe.cov_sqrt.copy()
+    swe.update_step(y)
+
+    mean_chol = swe.mean.copy()
+    cov_sqrt_chol = swe.cov_sqrt.copy()
+
+    swe.mean[:] = mean_pred
+    swe.cov_sqrt[:] = cov_sqrt_pred
+    swe.update_step_svd(y)
+
+    # expect that the corrections are similar but not identical:
+    # they use a different covariance updating method
+    np.testing.assert_allclose(
+        mean_chol, swe.mean, atol=1e-8)
+
+    # RMSEs should be  similar
+    np.testing.assert_allclose(
+        rmse(H @ swe.mean, y), rmse(H @ mean_chol, y),
+        atol=1e-8
+    )
+
+    # as should the marginal variances
+    var_chol = np.sum(cov_sqrt_chol**2, axis=1)
+    var_svd = np.sum(swe.cov_sqrt**2, axis=1)
+    np.testing.assert_allclose(var_svd, var_chol, atol=1e-8)

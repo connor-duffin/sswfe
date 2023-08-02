@@ -4,7 +4,7 @@ import logging
 import numpy as np
 import fenics as fe
 
-from scipy.linalg import cholesky, cho_factor, cho_solve, eigh
+from scipy.linalg import cholesky, cho_factor, cho_solve, eigh, svd
 from scipy.sparse.linalg import splu
 from statfenics.utils import dolfin_to_csr
 from statfenics.covariance import (laplacian_evd,
@@ -526,6 +526,37 @@ class ShallowTwoFilter(ShallowTwo):
                    - self.n_obs * np.log(2 * np.pi) / 2)
             return lml
 
+    def update_step_svd(self, y, compute_lml=False):
+        # perform the update step using the SVD, as in:
+        # 
+        # J. Schmidt, P. Hennig, J. Nick, and F. Tronarp,
+        # 'The Rank-Reduced Kalman Filter: Approximate Dynamical-Low-Rank Filtering In High Dimensions'.
+        # arXiv, Jun. 28, 2023. Accessed: Aug. 02, 2023.
+        # Available: http://arxiv.org/abs/2306.07774
+
+        self.mean_obs[:] = self.H @ self.mean
+        self.HL[:] = self.H @ self.cov_sqrt
+
+        # these are only possible as `R` has a constant diagonal 
+        e = 1/self.sigma_y * (y - self.mean_obs)
+        V, s, Ut = svd(1/self.sigma_y * self.HL, full_matrices=False)
+
+        S = np.diag(s)
+        inv_diag_scale = np.diag(1 / (s**2 + 1))
+        inv_diag_scale_sqrt = np.sqrt(inv_diag_scale)
+
+        # mean update
+        correction = self.cov_sqrt @ (Ut.T @ (inv_diag_scale @ S @ V.T @ e))
+        self.mean += correction
+
+        # covariance update
+        self.R = Ut.T @ inv_diag_scale_sqrt
+        self.cov_sqrt = self.cov_sqrt @ self.R
+
+        if compute_lml:
+            logger.warn("LML calculations NOT implemented yet")
+            pass
+
     def set_prev(self):
         fe.assign(self.du_prev, self.du)
         self.cov_sqrt_prev[:] = self.cov_sqrt
@@ -635,6 +666,24 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         self.J_prev_mat = fe.PETScMatrix()
         fe.assemble(self.J_prev, tensor=self.J_prev_mat)
+
+        try:
+            # read in values as needed for the setting
+            self.H = stat_params["H"]
+            self.sigma_y = stat_params["sigma_y"]
+
+            # self.n_obs = self.H.shape[0]
+            # self.mean_obs = np.zeros((self.n_obs, ))
+            # self.HL = np.zeros((self.n_obs, self.k))
+
+            # self.S_inv_HL = np.zeros((self.n_obs, self.k))
+            # self.S_inv_y = np.zeros((self.n_obs, ))
+
+            # self.cov_obs = np.zeros((self.n_obs, self.n_obs))
+            # self.R = np.zeros((self.k, self.k))
+        except KeyError:
+            logger.warn(
+                "Obs. operator and noise not parsed: setup for prior run ONLY")
 
     def setup_prior_covariance(self):
         """ Compute the prior covariance matrix G^(1/2).
@@ -797,6 +846,9 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         self.V.assemble()
         self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
+
+    def update_step(self, y):
+        pass
 
     def set_prev(self):
         """ Copy values into previous matrix. """
