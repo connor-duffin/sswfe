@@ -4,9 +4,13 @@ import numpy as np
 import fenics as fe
 
 from numpy.testing import assert_allclose
-from swfe.swe_2d import ShallowTwo, ShallowTwoFilter
+from swfe.swe_2d import (ShallowTwo,
+                         ShallowTwoFilter,
+                         ShallowTwoFilterPETSc)
 from scipy.sparse.linalg import spsolve
 from statfenics.utils import dolfin_to_csr, build_observation_operator
+
+from petsc4py import PETSc
 
 
 def rmse(y_est, y):
@@ -276,3 +280,66 @@ def test_shallowtwo_filter_conditioning():
     var_chol = np.sum(cov_sqrt_chol**2, axis=1)
     var_svd = np.sum(swe.cov_sqrt**2, axis=1)
     np.testing.assert_allclose(var_svd, var_chol, atol=1e-8)
+
+
+def test_shallowtwo_filter_petsc():
+    np.random.seed(27)
+    mesh = fe.RectangleMesh(fe.Point(0., 0.),
+                            fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "g": 9.8,
+              "u_inflow": 0.004, "inflow_period": 120,
+              "length": 2., "width": 1.}
+    control = {"dt": 0.01,
+               "theta": 0.5,
+               "simulation": "laminar",
+               "use_imex": False,
+               "use_les": False}
+    swe = ShallowTwoFilterPETSc(mesh, params, control, comm=fe.MPI.comm_world)
+    swe.setup_form()
+    swe.setup_solver()
+
+    # check setup
+    assert swe.length == 2.
+    assert swe.width == 1.
+
+    # observe every 10th point + sanity check running
+    x_obs = swe.x_coords[::5]
+    H = build_observation_operator(x_obs, swe.W, sub=(1,), out="petsc")
+
+    # setup filter: noise is approx 5% of state magnitude
+    rho = 1e-4
+    ell = 0.25
+    stat_params = dict(rho_u=rho, rho_v=rho, rho_h=rho,
+                       ell_u=ell, ell_v=ell, ell_h=ell,
+                       k_init_u=16, k_init_v=16, k_init_h=16, k=64,
+                       H=H, sigma_y=0.01 * params["u_inflow"])
+    swe.setup_filter(stat_params)
+    assert swe.n_obs == len(x_obs)
+    assert swe.mean_obs.getSize() == swe.n_obs
+    assert swe.HL.getSize() == (swe.n_obs, swe.k)
+
+    # check that we can just do these operations
+    swe.setup_prior_covariance()
+    swe.H.matMult(swe.cov_sqrt, result=swe.HL)
+
+    # create and setup as needed
+    y = PETSc.Vec().create(comm=swe.comm)
+    y.setSizes(swe.n_obs)
+    y.setUp()
+    y.assemble()
+
+    # increment forward SLIGHTLY! otherwise useless
+    t = swe.dt
+    swe.inlet_velocity.t = t
+    swe.prediction_step(t)
+
+    # and get the obs. operator to work
+    H.mult(swe.mean, y)
+
+    # Generate random Gaussian noise
+    noise = np.random.normal(0, swe.sigma_y, swe.n_obs)
+    noise_vec = PETSc.Vec().createWithArray(noise)
+    y.axpy(1.0, noise_vec)
+
+    # now perform the update
+    swe.update_step(y)

@@ -4,7 +4,7 @@ import numpy as np
 import fenics as fe
 import matplotlib.pyplot as plt
 
-from swe_les import LES
+from swfe.swe_les import LES
 
 
 def les_smagorinsky_eddy_viscosity():

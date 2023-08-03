@@ -448,7 +448,7 @@ class ShallowTwoFilter(ShallowTwo):
             self.cov_obs = np.zeros((self.n_obs, self.n_obs))
             self.R = np.zeros((self.k, self.k))
         except KeyError:
-            logger.warn(
+            logger.warning(
                 "Obs. operator and noise not parsed: setup for prior run ONLY")
 
         # tangent linear models
@@ -528,12 +528,11 @@ class ShallowTwoFilter(ShallowTwo):
 
     def update_step_svd(self, y, compute_lml=False):
         # perform the update step using the SVD, as in:
-        # 
+        #
         # J. Schmidt, P. Hennig, J. Nick, and F. Tronarp,
         # 'The Rank-Reduced Kalman Filter: Approximate Dynamical-Low-Rank Filtering In High Dimensions'.
         # arXiv, Jun. 28, 2023. Accessed: Aug. 02, 2023.
         # Available: http://arxiv.org/abs/2306.07774
-
         self.mean_obs[:] = self.H @ self.mean
         self.HL[:] = self.H @ self.cov_sqrt
 
@@ -554,7 +553,7 @@ class ShallowTwoFilter(ShallowTwo):
         self.cov_sqrt = self.cov_sqrt @ self.R
 
         if compute_lml:
-            logger.warn("LML calculations NOT implemented yet")
+            logger.warning("LML calculations NOT implemented yet")
             pass
 
     def set_prev(self):
@@ -671,18 +670,38 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             # read in values as needed for the setting
             self.H = stat_params["H"]
             self.sigma_y = stat_params["sigma_y"]
+            self.n_obs = self.H.getSize()[0]
 
-            # self.n_obs = self.H.shape[0]
-            # self.mean_obs = np.zeros((self.n_obs, ))
-            # self.HL = np.zeros((self.n_obs, self.k))
+            self.mean_obs = PETSc.Vec().create(comm=self.comm)
+            self.mean_obs.setSizes(self.n_obs)
+            self.mean_obs.setUp()
+            self.mean_obs.assemble()
 
-            # self.S_inv_HL = np.zeros((self.n_obs, self.k))
+            self.HL = PETSc.Mat().create(comm=self.comm)
+            self.HL.setSizes([self.n_obs, self.k])
+            self.HL.setType("mpidense")
+            self.HL.setUp()
+            self.HL.assemble()
+
+            # create matrices for posterior updates
+            self.V_update = PETSc.Mat().create(comm=self.comm)
+            self.V_update.setSizes([self.n_obs, self.k])
+            self.V_update.setType("mpidense")
+            self.V_update.setUp()
+            self.V_update.assemble()
+            self.U_update = PETSc.Mat().create(comm=self.comm)
+            self.U_update.setSizes([self.k, self.k])
+            self.U_update.setType("mpidense")
+            self.U_update.setUp()
+            self.U_update.assemble()
+
+            # self.np.zeros((self.n_obs, self.k))
             # self.S_inv_y = np.zeros((self.n_obs, ))
 
             # self.cov_obs = np.zeros((self.n_obs, self.n_obs))
             # self.R = np.zeros((self.k, self.k))
         except KeyError:
-            logger.warn(
+            logger.warning(
                 "Obs. operator and noise not parsed: setup for prior run ONLY")
 
     def setup_prior_covariance(self):
@@ -848,7 +867,66 @@ class ShallowTwoFilterPETSc(ShallowTwo):
         self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
 
     def update_step(self, y):
-        pass
+        # perform the update step using the SVD, as in:
+        #
+        # J. Schmidt, P. Hennig, J. Nick, and F. Tronarp,
+        # 'The Rank-Reduced Kalman Filter: Approximate Dynamical-Low-Rank Filtering In High Dimensions'.
+        # arXiv, Jun. 28, 2023. Accessed: Aug. 02, 2023.
+        # Available: http://arxiv.org/abs/2306.07774
+        self.H.mult(self.mean, self.mean_obs)
+        self.H.matMult(self.cov_sqrt, result=self.HL)
+
+        # these are only possible as `R` has a constant diagonal
+        self.mean_obs.axpby(1/self.sigma_y, -1/self.sigma_y, y)
+        self.HL.scale(1/self.sigma_y)
+
+        # now setup SVD computations
+        S = SLEPc.SVD(comm=self.comm)
+        S.create()
+        S.setOperator(self.HL)
+        S.setDimensions(nsv=self.k)
+        S.setType(S.Type.CROSS)
+        S.setCrossExplicitMatrix(True)
+        S.setFromOptions()
+        S.setUp()
+        S.solve()
+
+        rows = self.V_update.getOwnershipRange()
+        V_rows = list(range(rows[0], rows[1]))
+
+        rows = self.U_update.getOwnershipRange()
+        U_rows = list(range(rows[0], rows[1]))
+
+        u, v = self.HL.getVecs()
+        sigmas = np.zeros((self.k, ))
+        for i in range(self.k):
+            sigmas[i] = S.getSingularTriplet(i, U=v, V=u)
+
+            self.V_update.setValues(rows=V_rows, cols=i, values=v.getArray())
+            self.U_update.setValues(rows=U_rows, cols=i, values=u.getArray())
+
+            # check dims
+            assert u.getSize() == self.k
+            assert v.getSize() == self.n_obs
+
+        # vector of singular vals
+        sigma_scale = PETSc.Vec().createWithArray(
+            sigmas, comm=self.comm)
+        inv_diag_scale_sqrt = PETSc.Vec().createWithArray(
+            1 / np.sqrt(sigmas**2 + 1), comm=self.comm)
+
+        cov_sqrt_copy = self.cov_sqrt.copy()
+        cov_sqrt_copy.matMult(self.U_update, result=self.cov_sqrt)
+        self.cov_sqrt.diagonalScale(L=None, R=inv_diag_scale_sqrt)
+
+        self.V.diagonalScale(L=None, R=sigma_scale)
+        self.V.diagonalScale(L=None, R=inv_diag_scale_sqrt)
+
+        e_adjust = PETSc.Vec().createWithArray(np.zeros((self.k, )))
+        self.V.multTranspose(self.mean_obs)
+
+        # self.V.assemble()
+        # V, s, Ut = svd(1/self.sigma_y * self.HL, full_matrices=False)
 
     def set_prev(self):
         """ Copy values into previous matrix. """
