@@ -336,10 +336,13 @@ def test_shallowtwo_filter_petsc():
     # and get the obs. operator to work
     H.mult(swe.mean, y)
 
-    # Generate random Gaussian noise
+    # generate random Gaussian noise
     noise = np.random.normal(0, swe.sigma_y, swe.n_obs)
     noise_vec = PETSc.Vec().createWithArray(noise)
     y.axpy(1.0, noise_vec)
 
-    # now perform the update
+    # now perform the update:
+    # sanity check that i don't break anything
     swe.update_step(y)
+    assert swe.mean.norm() >= 1e-10
+    assert swe.cov_sqrt.norm() >= 1e-10

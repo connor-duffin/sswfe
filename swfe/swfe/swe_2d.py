@@ -695,11 +695,8 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             self.U_update.setUp()
             self.U_update.assemble()
 
-            # self.np.zeros((self.n_obs, self.k))
-            # self.S_inv_y = np.zeros((self.n_obs, ))
-
-            # self.cov_obs = np.zeros((self.n_obs, self.n_obs))
-            # self.R = np.zeros((self.k, self.k))
+            # and create vector to store adjustment in
+            self.e_adjust = PETSc.Vec().createWithArray(np.zeros((self.k, )))
         except KeyError:
             logger.warning(
                 "Obs. operator and noise not parsed: setup for prior run ONLY")
@@ -909,24 +906,29 @@ class ShallowTwoFilterPETSc(ShallowTwo):
             assert u.getSize() == self.k
             assert v.getSize() == self.n_obs
 
+        # and assemble so we can use them
+        self.V_update.assemble()
+        self.U_update.assemble()
+
         # vector of singular vals
         sigma_scale = PETSc.Vec().createWithArray(
             sigmas, comm=self.comm)
         inv_diag_scale_sqrt = PETSc.Vec().createWithArray(
             1 / np.sqrt(sigmas**2 + 1), comm=self.comm)
 
+        # covariance update step
         cov_sqrt_copy = self.cov_sqrt.copy()
         cov_sqrt_copy.matMult(self.U_update, result=self.cov_sqrt)
         self.cov_sqrt.diagonalScale(L=None, R=inv_diag_scale_sqrt)
 
-        self.V.diagonalScale(L=None, R=sigma_scale)
-        self.V.diagonalScale(L=None, R=inv_diag_scale_sqrt)
+        # mean update step
+        self.V_update.diagonalScale(L=None, R=sigma_scale)
+        self.V_update.diagonalScale(L=None, R=inv_diag_scale_sqrt)
+        self.V_update.multTranspose(self.mean_obs, self.e_adjust)
+        self.cov_sqrt.mult(self.e_adjust, self.mean)
 
-        e_adjust = PETSc.Vec().createWithArray(np.zeros((self.k, )))
-        self.V.multTranspose(self.mean_obs)
-
-        # self.V.assemble()
-        # V, s, Ut = svd(1/self.sigma_y * self.HL, full_matrices=False)
+        # set vector as needed
+        self.du.vector().set_local(self.mean.getArray())
 
     def set_prev(self):
         """ Copy values into previous matrix. """
