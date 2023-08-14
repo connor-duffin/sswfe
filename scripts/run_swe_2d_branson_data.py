@@ -9,7 +9,6 @@ from argparse import ArgumentParser
 from tqdm import trange
 from scipy.sparse import vstack
 from scipy.signal import wiener
-from petsc4py import PETSc
 
 from swfe.swe_2d import ShallowTwoFilter
 from statfenics.utils import build_observation_operator
@@ -26,10 +25,14 @@ parser.add_argument("--use_petsc", action="store_true")
 parser.add_argument("--log_file", type=str, default="swe-filter-run.log")
 args = parser.parse_args()
 
-# setup logging
-logging.basicConfig(filename=args.log_file,
-                    encoding="utf-8",
-                    level=logging.DEBUG)
+# setup logging: log more if we log to a file
+if args.log_file is None:
+    logging.basicConfig(level=logging.INFO)
+else:
+    logging.basicConfig(filename=args.log_file,
+                        encoding="utf-8",
+                        level=logging.DEBUG)
+
 logger = logging.getLogger(__name__)
 
 if args.use_petsc:
@@ -57,7 +60,7 @@ Re = u_ref * length_ref / nu
 
 # dimensionless parameters
 params = dict(
-    nu=2 / Re,
+    nu=1 / Re,
     g=g * length_ref / u_ref**2,
     C=0.,
     H=0.053 / H_ref,
@@ -105,12 +108,10 @@ x_displacement = np.min(x[x > np.max(x_missing)])
 x_center_displacement = r - x_displacement
 x_global_displacement = L / 2 + x_center_displacement
 x_global = x + x_global_displacement
-print(x_global)
 
 # compute global `y` coordinates
 y_mid = y[len(y) // 2]
 y_global = B / 2 + (y - y_mid)
-print(y_global)
 
 # and create meshgrid according to our current setup
 x_mg, y_mg = np.meshgrid(x_global, y_global, indexing="ij")
@@ -143,12 +144,31 @@ v_depth_averaged = v_depth_averaged.assign_coords(
 ud = u_depth_averaged.to_numpy() / u_ref
 vd = v_depth_averaged.to_numpy() / u_ref
 nrows, ncols = vd[0, :, :].shape
-
-# TODO(connor): NEED TO FILTER OUT NaNs
 nt_obs = ud.shape[0]
+
+# mask values "close" to the cylinder, avoiding values outside the mesh
+c = np.sqrt((x_mg - L / 2)**2 + (y_mg - B / 2)**2)
+mask = (c <= 0.6)
+
 t_obs = u_depth_averaged.coords["time_rel"].to_numpy() / time_ref
-u_obs = ud.reshape((nt_obs, nrows * ncols))
-v_obs = vd.reshape((nt_obs, nrows * ncols))
+x_obs = np.vstack((x_mg[~mask], y_mg[~mask])).T
+u_obs = ud[:, ~mask]
+v_obs = vd[:, ~mask]
+
+# checking sanity
+period_ref = period / time_ref
+assert t_obs[-1] / period_ref >= 5.
+
+assert x_obs.shape[1] == 2
+assert np.all(np.logical_and(x_obs[:, 0] >= 10., x_obs[:, 0] <= 20.))
+assert np.all(np.logical_and(x_obs[:, 1] >= 0., x_obs[:, 1] <= 5.))
+nx_obs = x_obs.shape[0]
+print(f"Taking in {nx_obs} observations each time point")
+assert np.all(~np.isnan(x_obs))
+
+# NO NaNs ALLOWED!!!
+assert np.any(np.isnan(u_obs)) == False
+assert np.any(np.isnan(v_obs)) == False
 
 assert ud.shape == vd.shape
 assert ud[0, :, :].shape == x_mg.shape
@@ -173,27 +193,10 @@ print(np.amin(sigma_u_est[~np.isnan(sigma_u_est)]),
 # HACK(connor): setting to minimum for compatibility
 sigma_y = np.amin(sigma_u_est[~np.isnan(sigma_u_est)])
 
-# and set the meshgrid as needed
-x_mg = x_mg.reshape((nrows * ncols, 1))
-y_mg = y_mg.reshape((nrows * ncols, 1))
-
-# at this stage the data is ready to be assimilated into the model
-x_obs = np.hstack((x_mg, y_mg))
-assert x_obs.shape[1] == 2
-assert np.all(np.logical_and(x_obs[:, 0] >= 10., x_obs[:, 0] <= 20.))
-assert np.all(np.logical_and(x_obs[:, 1] >= 0., x_obs[:, 1] <= 5.))
-nx_obs = x_obs.shape[0]
-print(f"Taking in {nx_obs} observations each time point")
-
-print(np.unique(x_obs[:, 0]))
-print(np.unique(x_obs[:, 1]))
-assert np.all(~np.isnan(x_obs))
-
 # set the observation operator
 Hu = build_observation_operator(x_obs, swe.W, sub=(0, 0))
 Hv = build_observation_operator(x_obs, swe.W, sub=(0, 1))
 H = vstack((Hu, Hv), format="csr")
-np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
 logger.info("Observation operator shape is %s", H.shape)
 
 # then setup filter (basically compute prior additive noise covariance)
@@ -206,3 +209,118 @@ stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0.,
                    k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full,
                    H=H, sigma_y=0.05 * params["u_inflow"])
 swe.setup_filter(stat_params)
+np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
+
+# checking things are sound
+np.testing.assert_allclose(swe.mean[swe.u_dofs], 0.)
+np.testing.assert_allclose(swe.mean[swe.v_dofs], 0.)
+np.testing.assert_allclose(swe.mean[swe.h_dofs], 0.)
+
+t = 0.
+t_final = 1 * period / time_ref
+nt = np.int32(np.round(t_final / control["dt"]))
+
+checkpoint_interval = 10
+output = h5py.File(args.output_file, mode="w")
+t_checkpoint = output.create_dataset(
+    "t_checkpoint", shape=(1, ))
+mean_checkpoint = output.create_dataset(
+    "mean_checkpoint", shape=swe.mean.shape)
+cov_sqrt_checkpoint = output.create_dataset(
+    "cov_sqrt_checkpoint", shape=swe.cov_sqrt.shape)
+
+# check this is an integer, then cast to an integer
+obs_interval = t_obs[1] / control["dt"]
+assert obs_interval % 1 <= 1e-14
+obs_interval = np.int32(t_obs[1] / control["dt"])
+nt_obs = len([i for i in range(nt) if i % obs_interval == 0])
+
+ts = np.zeros((nt, ))
+means = np.zeros((nt, swe.mean.shape[0]))
+variances = np.zeros((nt, swe.mean.shape[0]))
+eff_rank = np.zeros((nt, ))
+
+rmse = np.zeros((nt_obs, ))
+y = np.zeros((nt, H.shape[0]))
+
+if args.compute_posterior:
+    lml = np.zeros((nt_obs, ))
+    logger.info("Starting posterior computations...")
+else:
+    logger.info("Starting prior computations...")
+
+# start after first data point
+i_dat = 1
+for i in trange(nt):
+    t += swe.dt
+    swe.inlet_velocity.t = t
+
+    # push models forward
+    try:
+        swe.prediction_step(t)
+        eff_rank[i] = swe.eff_rank
+        logger.info("Effective rank: %.5f", swe.eff_rank)
+    except Exception as e:
+        t_checkpoint[:] = t
+        mean_checkpoint[:] = swe.mean
+        cov_sqrt_checkpoint[:] = swe.cov_sqrt
+        logger.error("Failed at time %t:.5f, exiting...", t)
+        break
+
+    if (i + 1) % obs_interval == 0:
+        logger.info(f"Observation time reached: {t_obs[i_dat]:.4e}")
+        assert np.isclose(t_obs[i_dat], t)
+        y_obs = np.concatenate((u_obs[i_dat, :], v_obs[i_dat, :]))
+        y[i_dat, :] = y_obs
+
+        # assimilate data
+        try:
+            if args.compute_posterior:
+                lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
+
+            rmse[i_dat] = (
+                np.linalg.norm(y_obs - H @ swe.du.vector().get_local())
+                / np.sqrt(len(y_obs)))
+            logger.info("t = %.5f, rmse = %.5e", t, rmse[i_dat])
+        except Exception as e:
+            t_checkpoint[:] = t
+            mean_checkpoint[:] = swe.mean
+            cov_sqrt_checkpoint[:] = swe.cov_sqrt
+            logger.error("Failed at time %t:.5f, exiting...", t)
+            break
+        i_dat += 1
+
+    # checkpoint every so often
+    if i % checkpoint_interval:
+        t_checkpoint[:] = t
+        mean_checkpoint[:] = swe.mean
+        cov_sqrt_checkpoint[:] = swe.cov_sqrt
+
+    # and store things for outputs
+    ts[i] = t
+    means[i, :] = swe.du.vector().get_local()
+    variances[i, :] = np.sum(swe.cov_sqrt**2, axis=1)
+    swe.set_prev()
+
+# store all outputs storage
+logger.info("now saving output to %s", args.output_file)
+metadata = {**params, **control, **stat_params}
+for name, val in metadata.items():
+    if name == "H":
+        # don't create H, just store x-outputs
+        output.attrs.create("x_obs", x_obs)
+        output.attrs.create("observed_vars", ("u", "v"))
+    else:
+        # store values into wherever
+        output.attrs.create(name, val)
+
+output.create_dataset("t", data=ts)
+output.create_dataset("mean", data=means)
+output.create_dataset("variance", data=variances)
+output.create_dataset("eff_rank", data=eff_rank)
+output.create_dataset("rmse", data=rmse)
+
+if args.compute_posterior:
+    output.create_dataset("lml", data=lml)
+
+output.close()
