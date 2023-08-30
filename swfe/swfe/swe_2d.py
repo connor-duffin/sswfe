@@ -841,25 +841,28 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         self.cov_sqrt_pred.assemble()
 
+        # TODO(connor): make this more efficient
+        CTC = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
         S = SLEPc.SVD(comm=self.comm)
         S.create()
-        S.setOperator(self.cov_sqrt_pred)
+        S.setOperator(CTC)
         S.setDimensions(nsv=2 * self.k)
-        S.setType(S.Type.CROSS)
-        S.setCrossExplicitMatrix(True)
+        # S.setType(S.Type.CROSS)
+        # S.setCrossExplicitMatrix(True)
         S.setFromOptions()
         S.setUp()
         S.solve()
 
         rows = self.V.getOwnershipRange()
         V_rows = list(range(rows[0], rows[1]))
-        v, u = self.cov_sqrt_pred.getVecs()
+        v, u = CTC.getVecs()
 
         sigmas = np.zeros((self.k, ))
         for i in range(self.k):
             sigmas[i] = S.getSingularTriplet(i, u, v)
             self.V.setValues(rows=V_rows, cols=i, values=v.getArray())
 
+        np.testing.assert_allclose(np.sort(sigmas)[::-1], sigmas)
         self.V.assemble()
         self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
 

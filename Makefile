@@ -13,6 +13,10 @@ outputs/branson-run08-swe-prior-testing.h5:
 	python3 scripts/run_swe_2d_branson_data.py $@ \
 		--log_file log/branson-run08-swe-prior-testing.log
 
+outputs/branson-run08-swe-prior-testing-petsc.h5:
+	mpirun -n 16 python3 scripts/run_swe_2d_branson_data.py $@ \
+		--log_file log/branson-run08-swe-prior-testing.log
+
 outputs/branson-run08-swe-posterior-testing.h5:
 	python3 scripts/run_swe_2d_branson_data.py $@ \
 		--compute_posterior \
