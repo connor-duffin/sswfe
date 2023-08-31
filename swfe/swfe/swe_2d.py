@@ -843,26 +843,36 @@ class ShallowTwoFilterPETSc(ShallowTwo):
 
         # TODO(connor): make this more efficient
         CTC = self.cov_sqrt_pred.transposeMatMult(self.cov_sqrt_pred)
-        S = SLEPc.SVD(comm=self.comm)
-        S.create()
-        S.setOperator(CTC)
-        S.setDimensions(nsv=2 * self.k)
+        E = SLEPc.EPS(comm=self.comm)
+        E.create()
+        E.setOperators(CTC)
+        E.setProblemType(SLEPc.EPS.ProblemType.HEP)
+        E.setDimensions(nev=self.k, ncv=2*self.k)
+        E.setFromOptions()
+        E.setUp()
+        E.solve()
+
+        # S = SLEPc.SVD(comm=self.comm)
+        # S.create()
+        # S.setOperator(CTC)
+        # S.setDimensions(nsv=2 * self.k)
         # S.setType(S.Type.CROSS)
         # S.setCrossExplicitMatrix(True)
-        S.setFromOptions()
-        S.setUp()
-        S.solve()
+        # S.setFromOptions()
+        # S.setUp()
+        # S.solve()
+        # v, u = CTC.getVecs()
 
         rows = self.V.getOwnershipRange()
         V_rows = list(range(rows[0], rows[1]))
-        v, u = CTC.getVecs()
 
+        vr, vi = CTC.createVecs()
         sigmas = np.zeros((self.k, ))
         for i in range(self.k):
-            sigmas[i] = S.getSingularTriplet(i, u, v)
-            self.V.setValues(rows=V_rows, cols=i, values=v.getArray())
+            sigmas[i] = np.real(E.getEigenpair(i, vr, vi))
+            self.V.setValues(rows=V_rows, cols=i, values=vr.getArray())
 
-        np.testing.assert_allclose(np.sort(sigmas)[::-1], sigmas)
+        # np.testing.assert_allclose(np.sort(sigmas)[::-1], sigmas)
         self.V.assemble()
         self.cov_sqrt_pred.matMult(self.V, result=self.cov_sqrt)
 

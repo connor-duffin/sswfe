@@ -219,6 +219,7 @@ if args.use_petsc:
     for i in trange(nt):
         t += swe.dt
         swe.inlet_velocity.t = t
+
         swe.prediction_step(t)
         swe.set_prev()
 else:
