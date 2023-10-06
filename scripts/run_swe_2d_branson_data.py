@@ -25,6 +25,10 @@ parser.add_argument("--use_petsc", action="store_true")
 parser.add_argument("--log_file", type=str, default="swe-filter-run.log")
 args = parser.parse_args()
 
+# TODO(connor): add in newer choices for hyperparameters
+# rho, dt, k_approx, k_full
+
+# TODO(connor): automatic generation of output files
 # setup logging: log more if we log to a file
 if args.log_file is None:
     logging.basicConfig(level=logging.INFO)
@@ -165,7 +169,7 @@ nx_obs = x_obs.shape[0]
 print(f"Taking in {nx_obs} observations each time point")
 assert np.all(~np.isnan(x_obs))
 
-# NO NaNs ALLOWED!!!
+# NO NaNs ALLOWED!
 assert np.any(np.isnan(u_obs)) == False
 assert np.any(np.isnan(v_obs)) == False
 
@@ -196,13 +200,13 @@ print(np.amin(sigma_v_est[~np.isnan(sigma_v_est)]),
 sigma_y = 0.02
 
 t = 0.
-t_final = 1 * period / time_ref
+t_final = 5 * period / time_ref
 nt = np.int32(np.round(t_final / control["dt"]))
 
 rho = 5e-2  # approx 1% of the state should be off
 ell = 2.  # characteristic lengthscale from cylinder
-k_approx = 64
-k_full = 200
+k_approx = 128
+k_full = 256
 
 # HACK(connor): currently running conditionally
 # PETSc has much less bells and whistles
