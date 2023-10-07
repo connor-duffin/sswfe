@@ -6,7 +6,8 @@ import numpy as np
 import xarray as xr
 
 from argparse import ArgumentParser
-from tqdm import trange
+from multiprocessing import current_process
+from tqdm import tqdm
 from scipy.sparse import vstack
 from scipy.signal import wiener
 
@@ -19,30 +20,40 @@ size = comm.Get_size()
 
 # get command line arguments
 parser = ArgumentParser()
-parser.add_argument("output_file", type=str)
-parser.add_argument("--compute_posterior", action="store_true")
-parser.add_argument("--use_petsc", action="store_true")
-parser.add_argument("--log_file", type=str, default="swe-filter-run.log")
+parser.add_argument("--rho", type=float, default=1e-2)
+parser.add_argument("--dt", type=float, default=5e-2)
+parser.add_argument("--k_approx", type=int, default=100)
+parser.add_argument("--k_full", type=int, default=200)
+parser.add_argument("--tqdm_offset", type=int, default=0)
+parser.add_argument("--compute_posterior", action="store_true",
+                    help="Compute posterior; else compute prior")
+parser.add_argument("--dry_run", action="store_true",
+                    help="Run setup only; no prior/post calculations")
+parser.add_argument("--use_petsc", action="store_true",
+                    help="Compute using PETSc not numpy/scipy")
 args = parser.parse_args()
-
-# TODO(connor): add in newer choices for hyperparameters
-# rho, dt, k_approx, k_full
-
-# TODO(connor): automatic generation of output files
-# setup logging: log more if we log to a file
-if args.log_file is None:
-    logging.basicConfig(level=logging.INFO)
-else:
-    logging.basicConfig(filename=args.log_file,
-                        encoding="utf-8",
-                        level=logging.DEBUG)
-
-logger = logging.getLogger(__name__)
 
 # ##########################################
 # step 0: relevant constants and setup model
+output_file_base = (f"branson-run08-dt-{args.dt:.4f}-"
+                    + f"rho-{args.rho:.4e}-"
+                    + f"k-approx-{args.k_approx:d}-"
+                    + f"k-full-{args.k_full:d}")
+
+if args.compute_posterior:
+    output_file_base += "-post"
+else:
+    output_file_base += "-prior"
+
+OUTPUT_FILE = "outputs/" + output_file_base + ".h5"
+LOG_FILE = "log/" + output_file_base + ".log"
 MESH_FILE = "mesh/branson-mesh-nondim.xdmf"
 DATA_FILE = "data/Run08_G0_dt4.0_de1.0_ne5_velocity.nc"
+
+logging.basicConfig(filename=LOG_FILE,
+                    encoding="utf-8",
+                    level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # physical settings
 period = 120.
@@ -73,7 +84,7 @@ params = dict(
 
 # and numerical settings
 control = dict(
-    dt=5e-2,
+    dt=args.dt,
     theta=0.5,
     simulation="laminar",
     use_imex=False,
@@ -166,7 +177,7 @@ assert x_obs.shape[1] == 2
 assert np.all(np.logical_and(x_obs[:, 0] >= 10., x_obs[:, 0] <= 20.))
 assert np.all(np.logical_and(x_obs[:, 1] >= 0., x_obs[:, 1] <= 5.))
 nx_obs = x_obs.shape[0]
-print(f"Taking in {nx_obs} observations each time point")
+logger.info(f"Taking in {nx_obs} observations each time point")
 assert np.all(~np.isnan(x_obs))
 
 # NO NaNs ALLOWED!
@@ -190,37 +201,35 @@ for i in range(nrows):
         sigma_v_est[i, j] = np.std(vd[:, i, j] - vd_filtered)
 
 # check that the min/max variances are sound
-print(np.amin(sigma_u_est[~np.isnan(sigma_u_est)]),
-      np.amax(sigma_u_est[~np.isnan(sigma_u_est)]))
-print(np.amin(sigma_v_est[~np.isnan(sigma_v_est)]),
-      np.amax(sigma_v_est[~np.isnan(sigma_v_est)]))
+# print(np.amin(sigma_u_est[~np.isnan(sigma_u_est)]),
+#       np.amax(sigma_u_est[~np.isnan(sigma_u_est)]))
+# print(np.amin(sigma_v_est[~np.isnan(sigma_v_est)]),
+#       np.amax(sigma_v_est[~np.isnan(sigma_v_est)]))
 
 # HACK(connor): set for compatibility
 # sigma_y = np.mean(sigma_u_est[~np.isnan(sigma_u_est)])
 sigma_y = 0.02
+ell = 2.  # characteristic lengthscale from cylinder
 
 t = 0.
 t_final = 5 * period / time_ref
 nt = np.int32(np.round(t_final / control["dt"]))
-
-rho = 5e-2  # approx 1% of the state should be off
-ell = 2.  # characteristic lengthscale from cylinder
-k_approx = 128
-k_full = 256
+nt_obs = len(t_obs)
 
 # HACK(connor): currently running conditionally
-# PETSc has much less bells and whistles
+# as PETSc has much less bells and whistles
 if args.use_petsc:
     stat_params = dict(
-        rho_u=rho, rho_v=rho, rho_h=0.,
+        rho_u=args.rho, rho_v=args.rho, rho_h=0.,
         ell_u=ell, ell_v=ell, ell_h=ell,
-        k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full)
+        k_init_u=args.k_approx, k_init_v=args.k_approx, k_init_h=0,
+        k=args.k_full)
 
     swe.setup_filter(stat_params)
     swe.setup_prior_covariance()
 
     eff_rank = np.zeros((nt, ))
-    for i in trange(nt):
+    for i in trange(nt, position=args.tqdm_offset):
         t += swe.dt
         swe.inlet_velocity.t = t
 
@@ -234,11 +243,11 @@ else:
 
     # then setup filter (basically compute prior additive noise covariance)
     stat_params = dict(
-        rho_u=rho, rho_v=rho, rho_h=0.,
+        rho_u=args.rho, rho_v=args.rho, rho_h=0.,
         ell_u=ell, ell_v=ell, ell_h=ell,
-        k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full,
+        k_init_u=args.k_approx, k_init_v=args.k_approx, k_init_h=0,
+        k=args.k_full,
         H=H, sigma_y=sigma_y)
-    print(stat_params["sigma_y"])
 
     swe.setup_filter(stat_params)
     np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
@@ -249,7 +258,7 @@ else:
     np.testing.assert_allclose(swe.mean[swe.h_dofs], 0.)
 
     checkpoint_interval = 10
-    output = h5py.File(args.output_file, mode="w")
+    output = h5py.File(OUTPUT_FILE, mode="w")
     t_checkpoint = output.create_dataset(
         "t_checkpoint", shape=(1, ))
     mean_checkpoint = output.create_dataset(
@@ -261,7 +270,7 @@ else:
     obs_interval = t_obs[1] / control["dt"]
     assert obs_interval % 1 <= 1e-14
     obs_interval = np.int32(t_obs[1] / control["dt"])
-    nt_obs = len([i for i in range(nt) if (i + 1) % obs_interval == 0])
+    logger.info(f"Observing every {obs_interval:d} timesteps")
 
     ts = np.zeros((nt, ))
     means = np.zeros((nt, swe.mean.shape[0]))
@@ -279,15 +288,17 @@ else:
 
     # start after first data point
     i_dat = 1
-    for i in trange(nt):
+    progress_bar = tqdm(total=nt, position=args.tqdm_offset)
+    for i in range(nt):
         t += swe.dt
         swe.inlet_velocity.t = t
 
-        # push models forward
+        # prediction step
         try:
-            swe.prediction_step(t)
-            eff_rank[i] = swe.eff_rank
-            logger.info("Effective rank: %.5f", swe.eff_rank)
+            if not args.dry_run:
+                swe.prediction_step(t)
+                eff_rank[i] = swe.eff_rank
+                logger.info("Effective rank: %.5f", swe.eff_rank)
         except Exception as e:
             t_checkpoint[:] = t
             mean_checkpoint[:] = swe.mean
@@ -295,15 +306,18 @@ else:
             logger.error("Failed at time %.5f, exiting...", t)
             break
 
-        # (potentially) assimilate data
-        if (i + 1) % obs_interval == 0:
+        # assimilation step
+        # if (i + 1) % obs_interval == 0:
+        # assert np.isclose(t_obs[i_dat], t)
+        if np.isclose(t_obs[i_dat], t):
             logger.info(f"Observation time reached: {t_obs[i_dat]:.4e}")
-            assert np.isclose(t_obs[i_dat], t)
+            logger.info(f"Data/obs. time: {t_obs[i_dat]:.5f}, "
+                        + f"Simulation time {t:.5f}")
             y_obs = np.concatenate((u_obs[i_dat, :], v_obs[i_dat, :]))
             y[i_dat, :] = y_obs
 
             try:
-                if args.compute_posterior:
+                if args.compute_posterior and not args.dry_run:
                     lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
 
                 rmse[i_dat] = (
@@ -324,14 +338,17 @@ else:
             mean_checkpoint[:] = swe.mean
             cov_sqrt_checkpoint[:] = swe.cov_sqrt
 
-        # and store things for outputs
+        # store things for outputs
         ts[i] = t
         means[i, :] = swe.du.vector().get_local()
         variances[i, :] = np.sum(swe.cov_sqrt**2, axis=1)
         swe.set_prev()
 
+        # and update progress bar
+        progress_bar.update(1)
+
     # store all outputs storage
-    logger.info("now saving output to %s", args.output_file)
+    logger.info("now saving output to %s", OUTPUT_FILE)
     metadata = {**params, **control, **stat_params}
     for name, val in metadata.items():
         if name == "H":
