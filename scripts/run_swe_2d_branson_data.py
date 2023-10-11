@@ -20,10 +20,11 @@ size = comm.Get_size()
 
 # get command line arguments
 parser = ArgumentParser()
-parser.add_argument("--rho", type=float, default=1e-2)
-parser.add_argument("--dt", type=float, default=5e-2)
+parser.add_argument("--rho", type=np.float64, default=1e-2)
+parser.add_argument("--dt", type=np.float64, default=5e-2)
 parser.add_argument("--k_approx", type=int, default=100)
 parser.add_argument("--k_full", type=int, default=200)
+parser.add_argument("--obs_skip", type=int, default=1)
 parser.add_argument("--tqdm_offset", type=int, default=0)
 parser.add_argument("--compute_posterior", action="store_true",
                     help="Compute posterior; else compute prior")
@@ -38,12 +39,13 @@ args = parser.parse_args()
 output_file_base = (f"branson-run08-dt-{args.dt:.4f}-"
                     + f"rho-{args.rho:.4e}-"
                     + f"k-approx-{args.k_approx:d}-"
-                    + f"k-full-{args.k_full:d}")
+                    + f"k-full-{args.k_full:d}-"
+                    + f"obs-skip-{args.obs_skip:d}-")
 
 if args.compute_posterior:
-    output_file_base += "-post"
+    output_file_base += "post"
 else:
-    output_file_base += "-prior"
+    output_file_base += "prior"
 
 OUTPUT_FILE = "outputs/" + output_file_base + ".h5"
 LOG_FILE = "log/" + output_file_base + ".log"
@@ -166,9 +168,10 @@ c = np.sqrt((x_mg - L / 2)**2 + (y_mg - B / 2)**2)
 mask = (c <= 0.6)
 
 t_obs = u_depth_averaged.coords["time_rel"].to_numpy() / time_ref
-x_obs = np.vstack((x_mg[~mask], y_mg[~mask])).T
-u_obs = ud[:, ~mask]
-v_obs = vd[:, ~mask]
+x_obs = np.vstack((x_mg[~mask][::args.obs_skip],
+                   y_mg[~mask][::args.obs_skip])).T
+u_obs = ud[:, ~mask][:, ::args.obs_skip]
+v_obs = vd[:, ~mask][:, ::args.obs_skip]
 
 # checking sanity
 period_ref = period / time_ref
@@ -179,8 +182,6 @@ assert np.all(np.logical_and(x_obs[:, 1] >= 0., x_obs[:, 1] <= 5.))
 nx_obs = x_obs.shape[0]
 logger.info(f"Taking in {nx_obs} observations each time point")
 assert np.all(~np.isnan(x_obs))
-
-# NO NaNs ALLOWED!
 assert np.any(np.isnan(u_obs)) == False
 assert np.any(np.isnan(v_obs)) == False
 
@@ -229,7 +230,7 @@ if args.use_petsc:
     swe.setup_prior_covariance()
 
     eff_rank = np.zeros((nt, ))
-    for i in trange(nt, position=args.tqdm_offset):
+    for i in tqdm(nt):
         t += swe.dt
         swe.inlet_velocity.t = t
 
