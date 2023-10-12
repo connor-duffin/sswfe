@@ -19,7 +19,7 @@ size = comm.Get_size()
 
 
 def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
-              use_petsc=False, compute_posterior=False, tqdm_offset=0, dry_run=False):
+              use_petsc=False, compute_posterior=False, tqdm_offset=0, load_from_checkpoint=False, dry_run=False):
     # numerical settings
     control = dict(
         dt=dt,
@@ -43,17 +43,14 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
     # HACK(connor): currently running conditionally
     # as PETSc has much less bells and whistles
     if use_petsc:
-        stat_params = dict(
-            rho_u=rho, rho_v=rho, rho_h=0.,
-            ell_u=ell, ell_v=ell, ell_h=ell,
-            k_init_u=k_approx, k_init_v=k_approx, k_init_h=0,
-            k=k_full)
+        stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0., ell_u=ell, ell_v=ell, ell_h=ell,
+                           k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full)
 
         swe.setup_filter(stat_params)
         swe.setup_prior_covariance()
 
         eff_rank = np.zeros((nt, ))
-        for i in tqdm(nt):
+        for i in tqdm(nt, ncols=80):
             t += swe.dt
             swe.inlet_velocity.t = t
 
@@ -66,12 +63,8 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
         logger.info("Observation operator shape is %s", H.shape)
 
         # then setup filter (basically compute prior additive noise covariance)
-        stat_params = dict(
-            rho_u=rho, rho_v=rho, rho_h=0.,
-            ell_u=ell, ell_v=ell, ell_h=ell,
-            k_init_u=k_approx, k_init_v=k_approx, k_init_h=0,
-            k=k_full,
-            H=H, sigma_y=sigma_y)
+        stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0., ell_u=ell, ell_v=ell, ell_h=ell,
+                           k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full, H=H, sigma_y=sigma_y)
 
         swe.setup_filter(stat_params)
         np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
@@ -83,14 +76,12 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
 
         checkpoint_interval = 10
         output = h5py.File(OUTPUT_FILE, mode="w")
-        t_checkpoint = output.create_dataset(
-            "t_checkpoint", shape=(1, ))
-        mean_checkpoint = output.create_dataset(
-            "mean_checkpoint", shape=swe.mean.shape)
-        cov_sqrt_checkpoint = output.create_dataset(
-            "cov_sqrt_checkpoint", shape=swe.cov_sqrt.shape)
+        t_checkpoint = output.create_dataset("t_checkpoint", shape=(1, ))
+        mean_checkpoint = output.create_dataset("mean_checkpoint", shape=swe.mean.shape)
+        cov_sqrt_checkpoint = output.create_dataset("cov_sqrt_checkpoint", shape=swe.cov_sqrt.shape)
 
         # check this is an integer, then cast to an integer
+        i_dat = 1
         obs_interval = t_obs[1] / control["dt"]
         assert obs_interval % 1 <= 1e-14
         obs_interval = np.int32(t_obs[1] / control["dt"])
@@ -104,6 +95,21 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
         rmse = np.zeros((nt_obs, ))
         y = np.zeros((nt, H.shape[0]))
 
+        if load_from_checkpoint:
+            with h5py.File(CHECKPOINT_FILE, mode="r") as f:
+                t = f["/t_checkpoint"][:].item()
+                i_dat = np.argwhere(t <= t_obs)[-1].item()
+                logger.info(f"Loading checkpointed data at t = {t:.5f}, starting data at index {i_dat}")
+
+                swe.mean[:] = f["/mean_checkpoint"][:]
+                swe.du.vector().set_local(f["/mean_checkpoint"][:])
+                swe.du_prev.vector().set_local(f["/mean_checkpoint"][:])
+
+                swe.cov_sqrt[:] = f["/cov_sqrt_checkpoint"][:]
+                swe.cov_sqrt_prev[:] = f["/cov_sqrt_checkpoint"][:]
+
+            # get location where we in the data
+
         if compute_posterior:
             lml = np.zeros((nt_obs, ))
             logger.info("Starting posterior computations...")
@@ -111,14 +117,12 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
             logger.info("Starting prior computations...")
 
         # start after first data point
-        # TODO(connor): remove tqdm_offset requirement: should be OK
-        i_dat = 1
+        # TODO(connor): remove tqdm_offset requirement via multiprocessing
         progress_bar = tqdm(total=nt, position=tqdm_offset)
         for i in range(nt):
             t += swe.dt
             swe.inlet_velocity.t = t
 
-            # prediction step
             try:
                 if not dry_run:
                     swe.prediction_step(t)
@@ -128,7 +132,8 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
                 t_checkpoint[:] = t
                 mean_checkpoint[:] = swe.mean
                 cov_sqrt_checkpoint[:] = swe.cov_sqrt
-                logger.error("Failed at time %.5f, exiting...", t)
+                logger.info(e)
+                logger.error("Solver (prediction_step) failed at time %.5f, exiting timestepping", t)
                 break
 
             # assimilation step
@@ -136,8 +141,7 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
             # assert np.isclose(t_obs[i_dat], t)
             if np.isclose(t_obs[i_dat], t):
                 logger.info(f"Observation time reached: {t_obs[i_dat]:.4e}")
-                logger.info(f"Data/obs. time: {t_obs[i_dat]:.5f}, "
-                            + f"Simulation time {t:.5f}")
+                logger.info(f"Data/obs. time: {t_obs[i_dat]:.5f}, " + f"Simulation time {t:.5f}")
                 y_obs = np.concatenate((u_obs[i_dat, :], v_obs[i_dat, :]))
                 y[i_dat, :] = y_obs
 
@@ -145,15 +149,14 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
                     if compute_posterior and not dry_run:
                         lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
 
-                    rmse[i_dat] = (
-                        np.linalg.norm(y_obs - H @ swe.du.vector().get_local())
-                        / np.sqrt(len(y_obs)))
+                    rmse[i_dat] = np.linalg.norm(y_obs - H @ swe.du.vector().get_local()) / np.sqrt(len(y_obs))
                     logger.info("t = %.5f, rmse = %.5e", t, rmse[i_dat])
                 except Exception as e:
                     t_checkpoint[:] = t
                     mean_checkpoint[:] = swe.mean
                     cov_sqrt_checkpoint[:] = swe.cov_sqrt
-                    logger.error("Failed at time %.5f, exiting...", t)
+                    logger.info(e)
+                    logger.error("Update step failed at time %.5f, exiting timestepping", t)
                     break
                 i_dat += 1
 
@@ -197,8 +200,6 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
 
 
 if __name__ == "__main__":
-    print("MODULARITY")
-
     # get command line arguments
     parser = ArgumentParser()
     parser.add_argument("--rho", type=np.float64, default=1e-2)
@@ -209,6 +210,7 @@ if __name__ == "__main__":
     parser.add_argument("--tqdm_offset", type=int, default=0)
     parser.add_argument("--compute_posterior", action="store_true", help="Compute posterior; else compute prior")
     parser.add_argument("--dry_run", action="store_true", help="Run setup only; no prior/post calculations")
+    parser.add_argument("--load_from_checkpoint", action="store_true", help="Load from checkpoint file")
     parser.add_argument("--use_petsc", action="store_true", help="Compute using PETSc not numpy/scipy")
     args = parser.parse_args()
 
@@ -226,13 +228,13 @@ if __name__ == "__main__":
         output_file_base += "prior"
 
     OUTPUT_FILE = "outputs/" + output_file_base + ".h5"
+    # CHECKPOINT_FILE = "outputs/" + output_file_base + "-checkpoint.h5"
+    CHECKPOINT_FILE = "outputs/branson-run08-dt-0.0500-rho-1.0000e+00-k-approx-128-k-full-256-obs-skip-20-post-checkpoint.h5"
     LOG_FILE = "log/" + output_file_base + ".log"
     MESH_FILE = "mesh/branson-mesh-nondim.xdmf"
     DATA_FILE = "data/Run08_G0_dt4.0_de1.0_ne5_velocity.nc"
 
-    logging.basicConfig(filename=LOG_FILE,
-                        encoding="utf-8",
-                        level=logging.DEBUG)
+    logging.basicConfig(filename=LOG_FILE, encoding="utf-8", level=logging.DEBUG)
     logger = logging.getLogger(__name__)
 
     # physical settings
@@ -328,8 +330,7 @@ if __name__ == "__main__":
     mask = (c <= 0.6)
 
     t_obs = u_depth_averaged.coords["time_rel"].to_numpy() / time_ref
-    x_obs = np.vstack((x_mg[~mask][::args.obs_skip],
-                       y_mg[~mask][::args.obs_skip])).T
+    x_obs = np.vstack((x_mg[~mask][::args.obs_skip], y_mg[~mask][::args.obs_skip])).T
     u_obs = ud[:, ~mask][:, ::args.obs_skip]
     v_obs = vd[:, ~mask][:, ::args.obs_skip]
 
@@ -370,4 +371,4 @@ if __name__ == "__main__":
 
     run_model(dt=args.dt, rho=args.rho, ell=2., sigma_y=0.02, k_approx=args.k_approx, k_full=args.k_full,
               use_petsc=args.use_petsc, compute_posterior=args.compute_posterior,
-              tqdm_offset=args.tqdm_offset, dry_run=args.dry_run)
+              tqdm_offset=args.tqdm_offset, dry_run=args.dry_run, load_from_checkpoint=args.load_from_checkpoint)
