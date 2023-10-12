@@ -118,6 +118,8 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
 
         # start after first data point
         # TODO(connor): remove tqdm_offset requirement via multiprocessing
+        inflation_factor = 5e-2
+        swe.cov_sqrt_prev *= (1. + inflation_factor)
         progress_bar = tqdm(total=nt, position=tqdm_offset)
         for i in range(nt):
             t += swe.dt
@@ -127,6 +129,9 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
                 if not dry_run:
                     swe.prediction_step(t)
                     eff_rank[i] = swe.eff_rank
+
+                    swe.cov_sqrt *= (1. + inflation_factor)
+                    swe.cov_sqrt_pred *= (1. + inflation_factor)
                     logger.info("Effective rank: %.5f", swe.eff_rank)
             except Exception as e:
                 t_checkpoint[:] = t
