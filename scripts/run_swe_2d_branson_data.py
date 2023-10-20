@@ -7,7 +7,7 @@ import xarray as xr
 
 from argparse import ArgumentParser
 from tqdm import tqdm
-from scipy.sparse import vstack
+from scipy.sparse import vstack, diags
 from scipy.signal import wiener
 
 from swfe.swe_2d import ShallowTwoFilter, ShallowTwoFilterPETSc
@@ -62,12 +62,25 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
         H = vstack((Hu, Hv), format="csr")
         logger.info("Observation operator shape is %s", H.shape)
 
+        # get indices from the operator for zeta calculation
+        H_rows, H_cols = H.nonzero()
+        n_approx_obs = len(H_cols)
+        n_approx_unobs = H.shape[1] - n_approx_obs
+        assert n_approx_obs + n_approx_unobs == len(swe.W.dofmap().dofs())
+
+        H_identity = diags(np.ones(n_approx_obs), shape=(n_approx_obs, len(swe.W.dofmap().dofs())))
+        H_identity_flip = diags(np.ones(n_approx_unobs), shape=(n_approx_unobs, len(swe.W.dofmap().dofs())))
+        print(H_identity.shape, H_identity_flip.shape)
+
         # then setup filter (basically compute prior additive noise covariance)
         stat_params = dict(rho_u=rho, rho_v=rho, rho_h=0., ell_u=ell, ell_v=ell, ell_h=ell,
                            k_init_u=k_approx, k_init_v=k_approx, k_init_h=0, k=k_full, H=H, sigma_y=sigma_y)
 
         swe.setup_filter(stat_params)
         np.testing.assert_allclose(H @ swe.mean, np.zeros((2 * nx_obs, )))
+
+        # check that H_identity hack works
+        print((H_identity * swe.cov_sqrt).shape)
 
         # checking things are sound
         np.testing.assert_allclose(swe.mean[swe.u_dofs], 0.)
@@ -120,7 +133,7 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
         # TODO(connor): remove tqdm_offset requirement via multiprocessing
         inflation_factor = 5e-2
         swe.cov_sqrt_prev *= (1. + inflation_factor)
-        progress_bar = tqdm(total=nt, position=tqdm_offset)
+        progress_bar = tqdm(total=nt, position=tqdm_offset, ncols=80)
         for i in range(nt):
             t += swe.dt
             swe.inlet_velocity.t = t
@@ -151,6 +164,9 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
                 y[i_dat, :] = y_obs
 
                 try:
+                    theta = np.sqrt(np.sum((y_obs - H @ swe.du.vector().get_local())**2) / len(y_obs))
+                    logger.info("t = %.5f, theta = %.5e", t, theta)
+
                     if compute_posterior and not dry_run:
                         lml[i_dat] = swe.update_step(y_obs, compute_lml=True)
 
@@ -164,6 +180,10 @@ def run_model(dt, rho, ell, sigma_y, k_approx, k_full,
                     logger.error("Update step failed at time %.5f, exiting timestepping", t)
                     break
                 i_dat += 1
+
+            if not dry_run:
+                zeta = np.linalg.norm((H_identity @ swe.cov_sqrt) @ (H_identity_flip @ swe.cov_sqrt).T, ord="fro")
+                logger.info("Zeta (cross-cov): %.5e", zeta)
 
             # checkpoint every so often
             if i % checkpoint_interval:

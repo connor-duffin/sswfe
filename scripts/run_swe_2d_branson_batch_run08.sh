@@ -1,8 +1,8 @@
 #!/bin/bash
 
 RHO=1
-K_APPROX=100
-K_FULL=150
+K_APPROX=64
+K_FULL=128
 DT=0.05
 
 python3 scripts/run_swe_2d_branson_data.py \
