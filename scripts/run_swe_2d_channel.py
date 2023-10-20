@@ -5,7 +5,7 @@ import fenics as fe
 import numpy as np
 
 from argparse import ArgumentParser
-from swe_2d import ShallowTwo
+from swfe.swe_2d import ShallowTwo
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -19,17 +19,17 @@ size = comm.Get_size()
 
 # set inputs etc
 parser = ArgumentParser()
-parser.add_argument("--mesh_file", type=str)
-parser.add_argument("--output_file", type=str)
 parser.add_argument("--write_checkpoint", action="store_true")
 parser.add_argument("--load_from_checkpoint", action="store_true")
 parser.add_argument("--checkpoint_file", type=str)
 args = parser.parse_args()
 
-# run 8 from Paul's JFM paper
+MESH_FILE = "mesh/branson-mesh-nondim.xdmf"
+OUTPUT_FILE = "outputs/branson-imex-nondim-testing.h5"
+
 # physical settings
 period = 120.
-nu = 1e-6
+nu = 5e-6
 g = 9.8
 
 # reference values
@@ -41,25 +41,12 @@ H_ref = length_ref
 # compute reynolds number
 Re = u_ref * length_ref / nu
 
-params = dict(
-    nu=1 / re,
-    g=g * h_ref / u_ref**2,
-    c=0.,
-    h=0.053 / h_ref,
-    u_inflow=0.004 / u_ref,
-    inflow_period=period / time_ref)
-control = dict(
-    dt=5e-2,
-    theta=0.5,
-    simulation="cylinder",
-    use_imex=false,
-    use_les=false)
+params = dict(nu=1 / Re, g=g * H_ref / u_ref**2, C=0., H=0.053 / H_ref,
+              length=20., width=5., cylinder_centre=(10, 2.5), cylinder_radius=0.5,
+              u_inflow=0.004 / u_ref, inflow_period=period / time_ref)
+control = dict(dt=5e-2, simulation="cylinder", use_imex=False, use_les=False, theta=0.5)
 
-# mesh = fe.RectangleMesh(comm, fe.Point(0, 0,), fe.Point(10, 5), 32, 16)
-swe = ShallowTwo(mesh=args.mesh_file,
-                 params=params,
-                 control=control,
-                 comm=comm)
+swe = ShallowTwo(mesh=MESH_FILE, params=params, control=control, comm=comm)
 swe.setup_form()
 swe.setup_solver(use_ksp=False)
 
@@ -184,7 +171,7 @@ if args.write_checkpoint:
 
 # store outputs after MPI has gathered each
 if rank == 0:
-    with h5py.File(args.output_file, "w") as f:
+    with h5py.File(OUTPUT_FILE, "w") as f:
         # tag with appropriate metadata
         metadata = {**params, **control}
         for name, val in metadata.items():
