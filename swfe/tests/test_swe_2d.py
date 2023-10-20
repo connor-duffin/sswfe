@@ -4,9 +4,7 @@ import numpy as np
 import fenics as fe
 
 from numpy.testing import assert_allclose
-from swfe.swe_2d import (ShallowTwo,
-                         ShallowTwoFilter,
-                         ShallowTwoFilterPETSc)
+from swfe.swe_2d import ShallowTwo, ShallowTwoFilter, ShallowTwoEnsemble, ShallowTwoFilterPETSc
 from scipy.sparse.linalg import spsolve
 from statfenics.utils import dolfin_to_csr, build_observation_operator
 
@@ -346,3 +344,36 @@ def test_shallowtwo_filter_petsc():
     swe.update_step(y)
     assert swe.mean.norm() >= 1e-10
     assert swe.cov_sqrt.norm() >= 1e-10
+
+
+def test_shallowtwo_ensemble():
+    mesh = fe.RectangleMesh(fe.Point(0., 0.), fe.Point(2., 1.), 32, 16)
+    params = {"nu": 1e-2, "C": 0., "H": 0.05, "g": 9.8,
+              "u_inflow": 0.004, "inflow_period": 120,
+              "length": 2., "width": 1.}
+    control = {"dt": 0.01, "theta": 0.5, "simulation": "laminar", "use_imex": False, "use_les": False}
+    swe = ShallowTwoEnsemble(mesh, params, control)
+    swe.setup_form()
+    swe.setup_solver()
+
+    assert swe.length == 2.
+    assert swe.width == 1.
+
+    # setup filter (basically compute prior additive noise covariance)
+    stat_params = dict(rho_u=1., rho_v=1., rho_h=1., ell_u=0.5, ell_v=0.5, ell_h=0.5,
+                       k_init_u=16, k_init_v=16, k_init_h=16, k=16, n_ens=32)
+    swe.setup_filter(stat_params)
+
+    np.random.seed(27)
+    Z = np.random.normal(size=(swe.k_init_u + swe.k_init_v + swe.k_init_h, stat_params["n_ens"]))
+    xi = swe.K_sqrt @ Z
+    xi_var = np.var(xi, axis=1)
+    assert xi_var.shape == (len(swe.du.vector().get_local()), )
+    assert xi.shape[0] == len(swe.du.vector().get_local())
+
+    # propagate ensemble
+    np.random.seed(27)
+    swe.prediction_step(t=control["dt"])
+    swe.set_prev()
+
+    np.testing.assert_allclose(swe.du_ens, swe.du_prev_ens)

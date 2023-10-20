@@ -48,13 +48,14 @@ class ShallowTwo:
 
         if type(mesh) == str:
             # read mesh from file
-            logger.info("reading mesh from file")
             if self.comm is None:
+                logger.info("reading mesh from file")
                 self.mesh = fe.Mesh()
             else:
+                logger.info(f"reading mesh from file on {self.comm}")
                 self.mesh = fe.Mesh(self.comm)
 
-            f = fe.XDMFFile(mesh)
+            f = fe.XDMFFile(self.comm, mesh)
             f.read(self.mesh)
         else:
             logger.info("setting mesh from object")
@@ -129,12 +130,17 @@ class ShallowTwo:
         g = fe.Constant(self.g)
         nu = fe.Constant(self.nu)
         dt = fe.Constant(self.dt)
-        theta = fe.Constant(self.theta)
         C = fe.Constant(self.C)
+
+        if not self.use_imex:
+            theta = fe.Constant(self.theta)
 
         u_prev, h_prev = fe.split(self.du_prev)
         u_prev_prev, h_prev_prev = fe.split(self.du_prev_prev)
-        v_u, v_h = fe.TestFunctions(self.W)  # test fcn's
+
+        self.xi = fe.Function(self.W)
+        v_all = fe.TestFunction(self.W)
+        v_u, v_h = fe.split(v_all)
 
         # weak form: continuity is integrated by parts
         if self.use_imex:
@@ -163,7 +169,8 @@ class ShallowTwo:
                       + g * fe.inner(fe.grad(h_theta), v_u) * fe.dx  # surface term
                       + fe.inner(fe.dot(u_theta, fe.nabla_grad(u_theta)), v_u) * fe.dx
                       + fe.inner(h - h_prev, v_h) / dt * fe.dx  # mass term h
-                      - fe.inner((self.H + h_theta) * u_theta, fe.grad(v_h)) * fe.dx)
+                      - fe.inner((self.H + h_theta) * u_theta, fe.grad(v_h)) * fe.dx
+                      + fe.inner(self.xi, v_all) * fe.dx)
 
         # laplacian/LES is used for dissipative effects
         # add in (parameterised) dissipation effects
@@ -178,9 +185,8 @@ class ShallowTwo:
             dissipation = stress_term(
                 u_theta, v_u, nu, nu_t=nu_t, laplacian=False)
         else:
-            nu_t = 0.
             dissipation = stress_term(
-                u_theta, v_u, nu, nu_t=nu_t, laplacian=True)
+                u_theta, v_u, nu, nu_t=0., laplacian=True)
 
         self.F += dissipation
 
@@ -502,18 +508,23 @@ class ShallowTwoFilter(ShallowTwo):
     def update_step(self, y, compute_lml=False):
         self.mean_obs[:] = self.H @ self.mean
         self.HL[:] = self.H @ self.cov_sqrt
+
+        # mean update (rank corrected)
+        gamma = 1e-3
+        self.cov_obs_rank_corrected = self.HL @ self.HL.T + gamma * self.H @ self.H.T
+        self.cov_obs_rank_corrected[np.diag_indices_from(self.cov_obs_rank_corrected)] += self.sigma_y**2 + 1e-10
+        S_chol = cho_factor(self.cov_obs_rank_corrected, lower=True, check_finite=False)
+        self.S_inv_y[:] = cho_solve(S_chol, y - self.mean_obs)
+        correction = self.cov_sqrt @ self.HL.T @ self.S_inv_y + gamma * self.H.T @ self.S_inv_y
+        # import pdb; pdb.set_trace()
+        self.mean += correction
+
+        # covariance update
         self.cov_obs[:] = self.HL @ self.HL.T
         self.cov_obs[np.diag_indices_from(self.cov_obs)] += self.sigma_y**2 + 1e-10
-        S_chol = cho_factor(
-            self.cov_obs, lower=True, overwrite_a=True, check_finite=False)
-
-        self.S_inv_y[:] = cho_solve(S_chol, y - self.mean_obs)
+        S_chol = cho_factor(self.cov_obs, lower=True, check_finite=False)
         self.S_inv_HL[:] = cho_solve(S_chol, self.HL)
-
-        self.mean += self.cov_sqrt @ self.HL.T @ self.S_inv_y
-        # TODO(connor): change to SVD for stability?
-        self.R[:] = cholesky(
-            np.eye(self.HL.shape[1]) - self.HL.T @ self.S_inv_HL, lower=True)
+        self.R[:] = cholesky(np.eye(self.HL.shape[1]) - self.HL.T @ self.S_inv_HL, lower=True)
         self.cov_sqrt[:] = self.cov_sqrt @ self.R
 
         # update fenics state vector
@@ -536,7 +547,7 @@ class ShallowTwoFilter(ShallowTwo):
         self.mean_obs[:] = self.H @ self.mean
         self.HL[:] = self.H @ self.cov_sqrt
 
-        # these are only possible as `R` has a constant diagonal 
+        # these are only possible as `R` has a constant diagonal
         e = 1/self.sigma_y * (y - self.mean_obs)
         V, s, Ut = svd(1/self.sigma_y * self.HL, full_matrices=False)
 
@@ -547,10 +558,11 @@ class ShallowTwoFilter(ShallowTwo):
         # mean update
         correction = self.cov_sqrt @ (Ut.T @ (inv_diag_scale @ S @ V.T @ e))
         self.mean += correction
+        self.du.vector().set_local(self.mean)
 
         # covariance update
         self.R = Ut.T @ inv_diag_scale_sqrt
-        self.cov_sqrt = self.cov_sqrt @ self.R
+        self.cov_sqrt[:] = self.cov_sqrt @ self.R
 
         if compute_lml:
             logger.warning("LML calculations NOT implemented yet")
@@ -559,6 +571,123 @@ class ShallowTwoFilter(ShallowTwo):
     def set_prev(self):
         fe.assign(self.du_prev, self.du)
         self.cov_sqrt_prev[:] = self.cov_sqrt
+
+
+class ShallowTwoEnsemble(ShallowTwo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup_filter(self, stat_params):
+        if self.use_imex:
+            logger.error("Not setup for IMEX yet, bailing out")
+            raise NotImplementedError
+
+        u, v = fe.TrialFunction(self.W), fe.TestFunction(self.W)
+        M = fe.assemble(fe.inner(u, v) * fe.dx)
+        self.M_scipy = dolfin_to_csr(M)
+
+        self.mean = np.copy(self.du.vector().get_local())
+        self.k_init_u = stat_params["k_init_u"]
+        self.k_init_v = stat_params["k_init_v"]
+        self.k_init_h = stat_params["k_init_h"]
+        self.k = stat_params["k"]
+
+        self.K_sqrt = np.zeros((self.mean.shape[0], self.k_init_u + self.k_init_v + self.k_init_h))
+
+        # setup spaces in which we posit things accordingly
+        U, V = self.U.split()
+        U_space, V_space = U.collapse(), V.collapse()
+
+        if stat_params["rho_u"] > 0.:
+            self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
+                fe.MPI.comm_self,
+                U_space,
+                self.k_init_u,
+                stat_params["rho_u"],
+                stat_params["ell_u"])
+
+            for i in range(self.k_init_u):
+                self.K_sqrt[self.u_dofs, i] = Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i])
+
+            logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
+
+        if stat_params["rho_v"] > 0.:
+            self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
+                fe.MPI.comm_self,
+                V_space,
+                self.k_init_v,
+                stat_params["rho_v"],
+                stat_params["ell_v"])
+
+            self.K_sqrt[self.v_dofs,
+                        self.k_init_u:(self.k_init_u + len(self.Kv_vals))] = (
+                Kv_vecs @ np.diag(np.sqrt(self.Kv_vals)))
+            logger.info(f"Spectral diff (v): {self.Kv_vals[-1]:.4e}, {self.Kv_vals[0]:.4e}")
+
+        if stat_params["rho_h"] > 0.:
+            self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
+                fe.MPI.comm_self,
+                self.H_space,
+                self.k_init_h,
+                stat_params["rho_h"],
+                stat_params["ell_h"])
+            self.K_sqrt[self.h_dofs,
+                        (self.k_init_u + self.k_init_v):(self.k_init_u + self.k_init_v + len(self.Kh_vals))] = (
+                Kh_vecs @ np.diag(np.sqrt(self.Kh_vals)))
+            logger.info(f"Spectral diff (h): {self.Kh_vals[-1]:.4e}, {self.Kh_vals[0]:.4e}")
+
+        # set up stuff for ensemble filter
+        self.n_ens = stat_params["n_ens"]
+        self.n_ens_local = self.n_ens // fe.MPI.comm_world.Get_size()
+        diff = self.n_ens % fe.MPI.comm_world.Get_size()
+        if fe.MPI.comm_world.Get_rank() < diff:
+            self.n_ens_local += 1
+
+        logger.info(f"solving for {self.n_ens_local} on {self.comm.Get_rank()}")
+        self.X = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble deviations
+        self.du_ens = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble
+        self.du_prev_ens = np.zeros((self.mean.shape[0], self.n_ens))  # previous ensemble
+
+        try:
+            self.H = stat_params["H"]
+            self.sigma_y = stat_params["sigma_y"]
+            self.n_obs = self.H.shape[0]
+        except KeyError:
+            logger.warning(
+                "Obs. operator and noise not parsed: setup for prior run ONLY")
+
+    def prediction_step(self, t):
+        for i in range(self.n_ens_local):
+            z = np.random.normal(size=(self.k_init_u + self.k_init_v + self.k_init_h, ))
+            self.xi.vector().set_local(np.sqrt(self.dt) * self.K_sqrt @ z)
+
+            # set previous + solve
+            self.du_prev.vector().set_local(np.copy(self.du_prev_ens[:, i]))
+            self.solve()
+
+            # set the current state
+            self.du_ens[:, i] = self.du.vector().get_local()
+
+        self.mean[:] = np.mean(self.du_ens, axis=1)
+        self.X[:] = (self.du_ens - self.mean[:, np.newaxis]) / np.sqrt(self.n_ens - 1)
+
+    def update_step(self, y, compute_lml=False):
+        S = self.H @ self.X
+        S_tilde = S / self.sigma_y
+
+        U, Sigma, VT = np.linalg.svd(S_tilde.T, full_matrices=False)
+        Sigma = np.diag(Sigma)
+
+        I = np.identity(Sigma.shape[0])
+        rhs = Sigma @ VT @ ((y - self.H @ self.mean) / self.sigma_y)
+        self.mean[:] = (self.mean
+                        + (1 / np.sqrt(self.n_ens - 1)) * self.X @ U
+                        @ np.linalg.solve((I + Sigma.T @ Sigma), rhs))
+        self.X[:] = self.X @ (U @ np.linalg.solve(I + Sigma @ Sigma.T, U.T))
+        self.du_ens[:] = self.mean[:, np.newaxis] + self.X
+
+    def set_prev(self):
+        self.du_prev_ens[:] = self.du_ens
 
 
 class ShallowTwoFilterPETSc(ShallowTwo):
