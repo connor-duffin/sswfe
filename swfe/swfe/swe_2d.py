@@ -7,10 +7,9 @@ import fenics as fe
 from scipy.linalg import cholesky, cho_factor, cho_solve, eigh, svd
 from scipy.sparse.linalg import splu
 from statfenics.utils import dolfin_to_csr
-from statfenics.covariance import (laplacian_evd,
-                                   sq_exp_evd_hilbert,
-                                   sq_exp_spectral_density)
+from statfenics.covariance import laplacian_evd, sq_exp_evd_hilbert, sq_exp_spectral_density
 
+from mpi4py.MPI import DOUBLE as MPI_DOUBLE
 from swfe.swe_les import LES
 
 from petsc4py import PETSc
@@ -41,6 +40,8 @@ class ShallowTwo:
         # register MPI communicator
         if comm is not None:
             self.comm = comm
+        else:
+            self.comm = COMM_WORLD
 
         # use theta-method or IMEX (CNLF)
         if not self.use_imex:
@@ -497,31 +498,23 @@ class ShallowTwoFilter(ShallowTwo):
         # TODO(connor) avoid reallocation
         D, V = eigh(self.cov_sqrt_pred.T @ self.cov_sqrt_pred)
         D, V = D[::-1], V[:, ::-1]
-        self.eff_rank = (
-            np.sum(np.sqrt(np.abs(D[0:self.k])))**2
-            / np.sum(np.abs(D[0:self.k])))
-        logger.info(
-            "Prop. variance kept in reduction: %.5f",
-            np.sum(D[0:self.k]) / np.sum(D))
+        self.eff_rank = (np.sum(np.sqrt(np.abs(D[0:self.k])))**2 / np.sum(np.abs(D[0:self.k])))
+        logger.info("Prop. variance kept in reduction: %.5f", np.sum(D[0:self.k]) / np.sum(D))
         np.dot(self.cov_sqrt_pred, V[:, 0:self.k], out=self.cov_sqrt)
 
     def update_step(self, y, compute_lml=False):
         self.mean_obs[:] = self.H @ self.mean
         self.HL[:] = self.H @ self.cov_sqrt
 
-        # mean update (rank corrected)
-        gamma = 1e-3
-        self.cov_obs_rank_corrected = self.HL @ self.HL.T + gamma * self.H @ self.H.T
-        self.cov_obs_rank_corrected[np.diag_indices_from(self.cov_obs_rank_corrected)] += self.sigma_y**2 + 1e-10
-        S_chol = cho_factor(self.cov_obs_rank_corrected, lower=True, check_finite=False)
+        # mean update
+        self.cov_obs[:] = self.HL @ self.HL.T
+        self.cov_obs[np.diag_indices_from(self.cov_obs)] += self.sigma_y**2 + 1e-10
+        S_chol = cho_factor(self.cov_obs, lower=True, check_finite=False)
         self.S_inv_y[:] = cho_solve(S_chol, y - self.mean_obs)
-        correction = self.cov_sqrt @ self.HL.T @ self.S_inv_y + gamma * self.H.T @ self.S_inv_y
-        # import pdb; pdb.set_trace()
+        correction = self.cov_sqrt @ self.HL.T @ self.S_inv_y
         self.mean += correction
 
         # covariance update
-        self.cov_obs[:] = self.HL @ self.HL.T
-        self.cov_obs[np.diag_indices_from(self.cov_obs)] += self.sigma_y**2 + 1e-10
         S_chol = cho_factor(self.cov_obs, lower=True, check_finite=False)
         self.S_inv_HL[:] = cho_solve(S_chol, self.HL)
         self.R[:] = cholesky(np.eye(self.HL.shape[1]) - self.HL.T @ self.S_inv_HL, lower=True)
@@ -535,7 +528,9 @@ class ShallowTwoFilter(ShallowTwo):
             lml = (- self.S_inv_y @ self.S_inv_y / 2
                    - log_det / 2
                    - self.n_obs * np.log(2 * np.pi) / 2)
-            return lml
+            return lml, correction
+        else:
+            return correction
 
     def update_step_svd(self, y, compute_lml=False):
         # perform the update step using the SVD, as in:
@@ -565,8 +560,9 @@ class ShallowTwoFilter(ShallowTwo):
         self.cov_sqrt[:] = self.cov_sqrt @ self.R
 
         if compute_lml:
-            logger.warning("LML calculations NOT implemented yet")
-            pass
+            logger.warning("LML calculations NOT implemented yet, returning nil")
+
+        return 0., correction
 
     def set_prev(self):
         fe.assign(self.du_prev, self.du)
@@ -586,7 +582,10 @@ class ShallowTwoEnsemble(ShallowTwo):
         M = fe.assemble(fe.inner(u, v) * fe.dx)
         self.M_scipy = dolfin_to_csr(M)
 
+        # set up the mean
         self.mean = np.copy(self.du.vector().get_local())
+        self.n_dofs = len(self.mean)
+
         self.k_init_u = stat_params["k_init_u"]
         self.k_init_v = stat_params["k_init_v"]
         self.k_init_h = stat_params["k_init_h"]
@@ -599,12 +598,8 @@ class ShallowTwoEnsemble(ShallowTwo):
         U_space, V_space = U.collapse(), V.collapse()
 
         if stat_params["rho_u"] > 0.:
-            self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(
-                fe.MPI.comm_self,
-                U_space,
-                self.k_init_u,
-                stat_params["rho_u"],
-                stat_params["ell_u"])
+            self.Ku_vals, Ku_vecs = sq_exp_evd_hilbert(fe.MPI.comm_self, U_space, self.k_init_u,
+                                                       stat_params["rho_u"], stat_params["ell_u"])
 
             for i in range(self.k_init_u):
                 self.K_sqrt[self.u_dofs, i] = Ku_vecs[:, i] * np.sqrt(self.Ku_vals[i])
@@ -612,12 +607,8 @@ class ShallowTwoEnsemble(ShallowTwo):
             logger.info(f"Spectral diff (u): {self.Ku_vals[-1]:.4e}, {self.Ku_vals[0]:.4e}")
 
         if stat_params["rho_v"] > 0.:
-            self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(
-                fe.MPI.comm_self,
-                V_space,
-                self.k_init_v,
-                stat_params["rho_v"],
-                stat_params["ell_v"])
+            self.Kv_vals, Kv_vecs = sq_exp_evd_hilbert(fe.MPI.comm_self, V_space, self.k_init_v,
+                                                       stat_params["rho_v"], stat_params["ell_v"])
 
             self.K_sqrt[self.v_dofs,
                         self.k_init_u:(self.k_init_u + len(self.Kv_vals))] = (
@@ -625,12 +616,8 @@ class ShallowTwoEnsemble(ShallowTwo):
             logger.info(f"Spectral diff (v): {self.Kv_vals[-1]:.4e}, {self.Kv_vals[0]:.4e}")
 
         if stat_params["rho_h"] > 0.:
-            self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(
-                fe.MPI.comm_self,
-                self.H_space,
-                self.k_init_h,
-                stat_params["rho_h"],
-                stat_params["ell_h"])
+            self.Kh_vals, Kh_vecs = sq_exp_evd_hilbert(fe.MPI.comm_self, self.H_space, self.k_init_h,
+                                                       stat_params["rho_h"], stat_params["ell_h"])
             self.K_sqrt[self.h_dofs,
                         (self.k_init_u + self.k_init_v):(self.k_init_u + self.k_init_v + len(self.Kh_vals))] = (
                 Kh_vecs @ np.diag(np.sqrt(self.Kh_vals)))
@@ -640,21 +627,43 @@ class ShallowTwoEnsemble(ShallowTwo):
         self.n_ens = stat_params["n_ens"]
         self.n_ens_local = self.n_ens // fe.MPI.comm_world.Get_size()
         diff = self.n_ens % fe.MPI.comm_world.Get_size()
-        if fe.MPI.comm_world.Get_rank() < diff:
+
+        # get the size/rank for the ensemble run
+        self.comm_world = fe.MPI.comm_world
+        self.size = fe.MPI.comm_world.Get_size()
+        self.rank = fe.MPI.comm_world.Get_rank()
+
+        if self.rank < diff:
             self.n_ens_local += 1
 
-        logger.info(f"solving for {self.n_ens_local} on {self.comm.Get_rank()}")
-        self.X = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble deviations
-        self.du_ens = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble
-        self.du_prev_ens = np.zeros((self.mean.shape[0], self.n_ens))  # previous ensemble
+        logger.info(f"solving for {self.n_ens_local} on {self.rank}")
+        self.du_ens_local = np.zeros((self.n_ens_local, self.mean.shape[0]))  # ensemble
+        self.du_prev_ens_local = np.zeros((self.n_ens_local, self.mean.shape[0]))  # previous ensemble
+
+        if self.rank == 0:
+            self.n_ens_local_all = self.comm_world.gather(self.n_ens_local)
+            displacements = np.cumsum(self.n_ens_local_all)
+            self.n_ens_displacements = (0, *list(displacements[:-1]))
+
+            self.X = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble deviations
+            self.du_ens = np.zeros((self.n_ens, self.mean.shape[0]))  # ensemble
+            self.du_prev_ens = np.zeros((self.n_ens, self.mean.shape[0]))  # previous ensemble
+        else:
+            self.n_ens_local_all = None
+            self.n_ens_displacements = None
+            self.X = None
+            self.du_ens = None
+            self.du_prev_ens = None
+
+        # print otherwise
+        logger.info(self.n_ens_local_all)
 
         try:
             self.H = stat_params["H"]
             self.sigma_y = stat_params["sigma_y"]
             self.n_obs = self.H.shape[0]
         except KeyError:
-            logger.warning(
-                "Obs. operator and noise not parsed: setup for prior run ONLY")
+            logger.warning("Obs. operator and noise not parsed: setup for prior run ONLY")
 
     def prediction_step(self, t):
         for i in range(self.n_ens_local):
@@ -662,32 +671,145 @@ class ShallowTwoEnsemble(ShallowTwo):
             self.xi.vector().set_local(np.sqrt(self.dt) * self.K_sqrt @ z)
 
             # set previous + solve
-            self.du_prev.vector().set_local(np.copy(self.du_prev_ens[:, i]))
+            self.du_prev.vector().set_local(np.copy(self.du_prev_ens_local[i, :]))
             self.solve()
 
             # set the current state
-            self.du_ens[:, i] = self.du.vector().get_local()
+            self.du_ens_local[i, :] = self.du.vector().get_local()
 
-        self.mean[:] = np.mean(self.du_ens, axis=1)
-        self.X[:] = (self.du_ens - self.mean[:, np.newaxis]) / np.sqrt(self.n_ens - 1)
+        logger.info("Gathering results")
+        if self.rank == 0:
+            # Gatherv is blocking + should synchronize across cores
+            self.comm_world.Gatherv(self.du_ens_local,
+                                    [self.du_ens, tuple(self.n_dofs * n_ens for n_ens in self.n_ens_local_all),
+                                     self.n_ens_displacements, MPI_DOUBLE])
+
+            logger.info(f"{self.du_ens.shape}")
+            self.mean[:] = np.mean(self.du_ens, axis=0)
+            self.X[:] = np.transpose((self.du_ens - self.mean[np.newaxis, :]) / np.sqrt(self.n_ens - 1))
 
     def update_step(self, y, compute_lml=False):
-        S = self.H @ self.X
-        S_tilde = S / self.sigma_y
+        if self.rank == 0:
+            S = self.H @ self.X
+            S_tilde = S / self.sigma_y
 
-        U, Sigma, VT = np.linalg.svd(S_tilde.T, full_matrices=False)
-        Sigma = np.diag(Sigma)
+            U, Sigma, VT = np.linalg.svd(S_tilde.T, full_matrices=False)
+            Sigma = np.diag(Sigma)
 
-        I = np.identity(Sigma.shape[0])
-        rhs = Sigma @ VT @ ((y - self.H @ self.mean) / self.sigma_y)
-        self.mean[:] = (self.mean
-                        + (1 / np.sqrt(self.n_ens - 1)) * self.X @ U
-                        @ np.linalg.solve((I + Sigma.T @ Sigma), rhs))
-        self.X[:] = self.X @ (U @ np.linalg.solve(I + Sigma @ Sigma.T, U.T))
-        self.du_ens[:] = self.mean[:, np.newaxis] + self.X
+            Id = np.identity(Sigma.shape[0])
+            rhs = Sigma @ VT @ ((y - self.H @ self.mean) / self.sigma_y)
+            self.mean[:] = (self.mean
+                            + (1 / np.sqrt(self.n_ens - 1)) * self.X @ U
+                            @ np.linalg.solve((Id + Sigma.T @ Sigma), rhs))
+            self.X[:] = self.X @ (U @ np.linalg.solve(Id + Sigma @ Sigma.T, U.T))
+            self.du_ens[:] = self.mean[np.newaxis, :] + self.X.T
 
     def set_prev(self):
-        self.du_prev_ens[:] = self.du_ens
+        self.du_prev_ens_local[:] = self.du_ens_local
+
+
+class ShallowTwoEnsembleVanilla(ShallowTwo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup_filter(self, stat_params):
+        if self.use_imex:
+            logger.error("Not setup for IMEX yet, bailing out")
+            raise NotImplementedError
+
+        # set up stuff for ensemble filter
+        self.error_process_noise = stat_params["error_process_noise"]
+        self.n_ens = stat_params["n_ens"]
+        self.n_ens_local = self.n_ens // fe.MPI.comm_world.Get_size()
+        diff = self.n_ens % fe.MPI.comm_world.Get_size()
+
+        # get the size/rank for the ensemble run
+        self.comm_world = fe.MPI.comm_world
+        self.size = fe.MPI.comm_world.Get_size()
+        self.rank = fe.MPI.comm_world.Get_rank()
+
+        if self.rank < diff:
+            self.n_ens_local += 1
+
+        logger.info(f"solving for {self.n_ens_local} on {self.rank}")
+        self.mean = np.zeros_like(self.du.vector().get_local())
+        self.n_dofs = self.du.vector().get_local().shape[0]
+        self.du_ens_local = np.zeros((self.n_ens_local, self.mean.shape[0]))  # ensemble
+        self.du_prev_ens_local = np.zeros((self.n_ens_local, self.mean.shape[0]))  # previous ensemble
+
+        self.n_ens_local_all = self.comm_world.allgather(self.n_ens_local)
+        displacements = self.n_dofs * np.cumsum(self.n_ens_local_all)
+
+        self.ens_totals = tuple(self.n_dofs * n_ens for n_ens in self.n_ens_local_all)
+        self.ens_displacements = (0, *list(displacements[:-1]))
+
+        # some minor checks for the ensemble
+        assert len(self.n_ens_local_all) == self.size
+        assert sum(self.n_ens_local_all) == self.n_ens
+        assert self.ens_displacements[-1] < self.n_ens * self.n_dofs
+
+        if self.rank == 0:
+            logger.info(self.n_ens_local_all)
+            logger.info(self.ens_displacements)
+
+            self.X = np.zeros((self.mean.shape[0], self.n_ens))  # ensemble deviations
+            self.du_ens = np.zeros((self.n_ens, self.mean.shape[0]))  # ensemble
+            self.du_prev_ens = np.zeros((self.n_ens, self.mean.shape[0]))  # previous ensemble
+        else:
+            self.X = None
+            self.du_ens = None
+            self.du_prev_ens = None
+
+        try:
+            self.H = stat_params["H"]
+            self.sigma_y = stat_params["sigma_y"]
+            self.n_obs = self.H.shape[0]
+        except KeyError:
+            logger.warning("Obs. operator and noise not parsed: setup for prior run ONLY")
+
+    def prediction_step(self, t):
+        for i in range(self.n_ens_local):
+            # set previous + solve
+            self.du_prev.vector().set_local(np.copy(self.du_prev_ens_local[i, :]))
+            self.solve()
+
+            # set the current state
+            self.du_ens_local[i, :] = self.du.vector().get_local()
+
+            z = np.random.normal(size=self.mean.shape)
+            self.du_ens_local[i, :] += np.sqrt(self.dt) * self.error_process_noise * z
+
+        # Gatherv is blocking + should synchronize across cores
+        self.comm_world.Gatherv(
+            self.du_ens_local, [self.du_ens, self.ens_totals, self.ens_displacements, MPI_DOUBLE], root=0)
+
+        if self.rank == 0:
+            logger.info(f"{self.du_ens.shape}")
+            self.mean[:] = np.mean(self.du_ens, axis=0)
+            self.X[:] = np.transpose((self.du_ens - self.mean[np.newaxis, :]) / np.sqrt(self.n_ens - 1))
+
+    def update_step(self, y, compute_lml=False):
+        if self.rank == 0:
+            S = self.H @ self.X
+            S_tilde = S / self.sigma_y
+
+            U, Sigma, VT = np.linalg.svd(S_tilde.T, full_matrices=False)
+            Sigma = np.diag(Sigma)
+
+            Id = np.identity(Sigma.shape[0])
+            rhs = Sigma @ VT @ ((y - self.H @ self.mean) / self.sigma_y)
+            self.mean[:] = (
+                self.mean + (1 / np.sqrt(self.n_ens - 1)) * self.X @ U @ np.linalg.solve((Id + Sigma.T @ Sigma), rhs))
+
+            self.X[:] = self.X @ (U @ np.linalg.solve(np.sqrt(Id + Sigma @ Sigma.T), U.T))
+            self.du_ens[:] = self.mean[np.newaxis, :] + self.X.T
+
+        # then scatter back around the nodes
+        self.comm_world.Scatterv(
+            [self.du_ens, self.ens_totals, self.ens_displacements, MPI_DOUBLE], self.du_ens_local, root=0)
+
+    def set_prev(self):
+        self.du_prev_ens_local[:] = self.du_ens_local
 
 
 class ShallowTwoFilterPETSc(ShallowTwo):
