@@ -1,14 +1,18 @@
 import gmsh
-import sys
+import meshio
+import os
 
 from argparse import ArgumentParser
 
 parser = ArgumentParser()
-parser.add_argument("output_file", type=str)
-parser.add_argument("--add_cylinder", action="store_true")
-parser.add_argument("--refine", action="store_true")
-parser.add_argument("--popup", action="store_true")
+parser.add_argument("output_file", type=str, help='Output .xdmf file to store the mesh in')
+parser.add_argument("--add_cylinder", action="store_true", help='Flag to add the cylinder into the mesh')
+parser.add_argument("--refinement_factor", type=float, default=1., help='Mesh size scale factor (large => coarser)')
+parser.add_argument("--popup", action="store_true", help='Flag to draw Tk GUI')
 args = parser.parse_args()
+
+temp_file, ext = os.path.splitext(args.output_file)
+temp_file += ".msh"
 
 # cm = 1e-2
 # domain_width = 0.41
@@ -23,7 +27,7 @@ cyl_center = [domain_length / 2, domain_width / 2]
 
 gmsh.initialize()
 gmsh.model.add("channel")
-h = cyl_diameter / 10
+h = args.refinement_factor * cyl_diameter / 10
 
 factory = gmsh.model.occ
 factory.addPoint(0., 0., 0, h, 1)
@@ -71,13 +75,20 @@ gmsh.option.setNumber("Mesh.Algorithm", 8)
 gmsh.model.mesh.generate(2)
 gmsh.model.mesh.optimize("Netgen")
 
-if args.refine:
-    gmsh.model.mesh.refine()
-    gmsh.model.mesh.optimize("Netgen")
-
-gmsh.write(args.output_file)
-
 if args.popup:
     gmsh.fltk.run()
 
+gmsh.write(temp_file)
 gmsh.finalize()
+
+print(f'Formatting temp. mesh ({temp_file}) to FEniCS ({args.output_file})')
+msh = meshio.read(temp_file)
+
+# extract relevant information
+cell_type = "triangle"
+cells = msh.get_cells_type(cell_type)
+points = msh.points[:, :2]
+triangle_msh = meshio.Mesh(points=points, cells={cell_type: cells})
+
+# output mesh
+meshio.write(args.output_file, triangle_msh)
